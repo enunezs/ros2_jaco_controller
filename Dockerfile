@@ -1,5 +1,4 @@
 FROM ros:foxy-ros-base
-#FROM ros:foxy-ros-desktop	
 LABEL maintainer="Emanuel Nunez S gmail dot com"
 ENV HOME /root
 WORKDIR $HOME
@@ -42,7 +41,7 @@ RUN apt-get update && apt-get install -y \
 RUN apt-get install iputils-ping
 
 # SET ENVIRONMENT
-WORKDIR /home/ema/workspaces/franka_emika_panda/
+WORKDIR /home/user/workspaces/franka_emika_panda/
  
 #### Step 0: Prerequisites: building and setting up libfranka
 # Done
@@ -65,28 +64,30 @@ RUN echo 'echo "Updating bash.rc" &&\
 	 export LC_NUMERIC=en_US.UTF-8' >> $HOME/.bashrc
 
 #### Step 1: Setup: building franka_ros2
+# TODO: change /home to ~ or $HOME
 
-WORKDIR /home/ema/workspaces/
+WORKDIR $HOME/workspaces/
 RUN mkdir -p franka_ros2_ws/src   && \ 
-	cd /home/ema/workspaces/franka_ros2_ws && \
+	cd $HOME/workspaces/franka_ros2_ws && \
 	git clone https://github.com/frankaemika/franka_ros2.git src/franka_ros2 && \
 	source /opt/ros/foxy/setup.bash && \
 	colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release && \
 	source install/setup.sh
 
-WORKDIR /home/ema/workspaces/franka_ros2_ws/src/franka_ros2
+#WORKDIR $HOME/workspaces/franka_ros2_ws/src/franka_ros2
 
 # Source ROS2
-#RUN /bin/bash -c "source /opt/ros/foxy/setup.bash && source /home/ema/workspaces/franka_ros2_ws/install/setup.bash"
+#RUN /bin/bash -c "source /opt/ros/foxy/setup.bash && source /home/user/workspaces/franka_ros2_ws/install/setup.bash"
 
-RUN echo 'colcon build &&\ 
-	source /opt/ros/foxy/setup.sh &&\
-	source /home/ema/workspaces/franka_ros2_ws/install/local_setup.sh' >> $HOME/.bashrc
+RUN echo 'source /opt/ros/foxy/setup.bash &&\
+	source $HOME/workspaces/franka_ros2_ws/install/setup.sh' >> $HOME/.bashrc
 
+CMD ["ros2", "launch", "franka_moveit_config", "moveit.launch.py", "robot_ip:=172.16.10.1"]
 
-#CMD ["ros2", "launch", "franka_moveit_config", "moveit.launch.py", "robot_ip:=172.16.10.1"]
+# source /opt/ros/foxy/setup.bash && source /home/user/workspaces/franka_ros2_ws/install/setup.bash
 
-# source /opt/ros/foxy/setup.bash && source /home/ema/workspaces/franka_ros2_ws/install/setup.bash
+# ros2 launch franka_bringup franka.launch.py robot_ip:=172.16.10.1 use_rviz:=true
+# ros2 launch franka_moveit_config moveit.launch.py robot_ip:=172.16.10.1
 # ros2 launch franka_moveit_config moveit.launch.py robot_ip:=172.16.10.1
 
 
