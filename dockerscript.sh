@@ -11,7 +11,6 @@ docker run -it \
 	--privileged \
 	-e "ROS_DOMAIN_ID=7" \
 	--net=host \
-	-v $(pwd):/home/ema/workspaces \
 	-v /dev/shm:/dev/shm \
 	-u 0 ros2-panda
 
