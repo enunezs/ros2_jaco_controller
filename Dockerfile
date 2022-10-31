@@ -40,6 +40,10 @@ RUN apt-get update && apt-get install -y \
 
 RUN apt-get install iputils-ping
 
+# Magic?
+# RUN apt-get update &&  apt-get dist-upgrade -y
+#RUN apt-get update &&  apt-get upgrade
+
 # SET ENVIRONMENT
 WORKDIR $HOME/ws/franka_emika_panda/
  
@@ -57,7 +61,6 @@ RUN apt-get update && apt-get install -y \
 	cmake --build . -j$(nproc) &&\
 	cpack -G DEB &&\
 	sudo dpkg -i libfranka-*.deb
-
 
 RUN echo 'echo "Updating bash.rc" &&\
 	 export RCUTILS_COLORIZED_OUTPUT=1 &&\
