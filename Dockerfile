@@ -1,12 +1,20 @@
 ARG ROS_DISTRO=humble
+<<<<<<< HEAD
 FROM ros:$ROS_DISTRO-ros-base
+=======
+FROM ros:$ROS_DISTRO-ros-base as ros-kinova
+>>>>>>> 32b90d2f783f4f6db2785f3dcba0953584cc9a6d
 LABEL maintainer="Emanuel Nunez S gmail dot com"
 ENV HOME /root
 WORKDIR $HOME
 SHELL ["/bin/bash", "-c"]
 
+<<<<<<< HEAD
 # As per instructions on
 # https://support.franka.de/docs/franka_ros2.html
+=======
+# As per instructions on https://github.com/RRL-ALeRT/kinova-ros2
+>>>>>>> 32b90d2f783f4f6db2785f3dcba0953584cc9a6d
 
 # general utilities
 RUN apt-get update && apt-get install -y \
@@ -19,7 +27,8 @@ RUN apt-get update && apt-get install -y \
     	unzip \
     	iputils-ping
 
-# install ros2 packages
+# install ros2 packages 
+# TODO: Pending to remove
 RUN apt-get update && apt-get install -y \ 
 	ros-$ROS_DISTRO-control-msgs \
 	ros-$ROS_DISTRO-xacro \
@@ -35,32 +44,48 @@ RUN apt-get update && apt-get install -y \
 	ros-$ROS_DISTRO-backward-ros \
 	python3-colcon-common-extensions
 
-RUN apt-get install iputils-ping
+RUN apt-get update && apt-get install -y \
+	iputils-ping \
+	libusb-1.0-0
 
 # RUN apt-get update &&  apt-get dist-upgrade -y
 
 # SET ENVIRONMENT
+<<<<<<< HEAD
 WORKDIR $HOME/ws/franka_emika_panda/
  
 #### Step 0: Prerequisites: building and setting up libfranka (ROS version independent)
 # Done
 # Known bug, no real time system
+=======
+#WORKDIR $HOME/ws/kinova-ros2/
+>>>>>>> 32b90d2f783f4f6db2785f3dcba0953584cc9a6d
 
-RUN apt-get update && apt-get install -y \ 
-	libpoco-dev \
-	libeigen3-dev &&\
-	git clone https://github.com/frankaemika/libfranka.git --recursive &&\
-	cd libfranka &&\
-	mkdir build && cd build &&\
-	cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF  .. &&\
-	cmake --build . -j$(nproc) &&\
-	cpack -G DEB &&\
-	sudo dpkg -i libfranka-*.deb
+#### Step 1: Setup: building franka_ros2
+
+WORKDIR $HOME/ws/
+
+RUN mkdir -p kinova-ros2/src   && \ 
+	cd $HOME/ws/kinova-ros2/src/ && \
+	git clone https://github.com/RRL-ALeRT/kinova-ros2.git -b $ROS_DISTRO &&\
+	mkdir -p /etc/udev/rules.d/ && \ 
+	cp kinova-ros2/kinova_driver/udev/10-kinova-arm.rules /etc/udev/rules.d/ && \ 
+	source /opt/ros/$ROS_DISTRO/setup.bash && \
+	colcon build --symlink-install --packages-select kinova_msgs kinova_bringup kinova_driver kinova_description kinova_demo
+
+#### SET ENVIRONMENT
+
+#RUN echo 'alias python="python3"' >> $HOME/.bashrc
+#RUN echo 'source /opt/ros/$ROS_DISTRO/setup.sh && colcon build' >> $HOME/.bashrc
+RUN echo 'source /opt/ros/$ROS_DISTRO/setup.sh' >> $HOME/.bashrc
+RUN echo 'source kinova-ros2/src/install/setup.bash' >> $HOME/.bashrc
 
 RUN echo 'echo "Updating bash.rc" &&\
 	 export RCUTILS_COLORIZED_OUTPUT=1 &&\
 	 export LC_NUMERIC=en_US.UTF-8' >> $HOME/.bashrc
+	 
 
+<<<<<<< HEAD
 #### Step 1: Setup: building franka_ros2
 
 WORKDIR $HOME/ws/
@@ -70,26 +95,56 @@ RUN mkdir -p franka_ros2_ws/src   && \
 	source /opt/ros/$ROS_DISTRO/setup.bash && \
 	colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release && \
 	source install/setup.sh
+=======
+### Split here # Seems we dont need this!
+FROM ros-kinova as ros-kinova-SDK
+#COPY --from=kinova-ros2 /bin/hello /bin/hello
 
-#WORKDIR $HOME/ws/franka_ros2_ws/src/franka_ros2
+## Install Jaco SDK
 
+COPY Ubuntu $HOME/ws/kinova-ros2/sdk/
+WORKDIR $HOME/ws/kinova-ros2/sdk/64bits
+RUN sudo dpkg -i $HOME/ws/kinova-ros2/sdk/64bits/KinovaAPI-5.2.0-amd64.deb 
+
+#./jaco2Install64_1.0.0 # sh /root/ws/kinova-ros2/sdk/64bits/jaco2Install64_1.0.0
+
+WORKDIR $HOME/ws/
+RUN echo '$HOME/ws/kinova-ros2/sdk/64bits/jaco2Install64_1.0.0 # sh /root/ws/kinova-ros2/sdk/64bits/jaco2Install64_1.0.0' >> $HOME/.bashrc
+
+>>>>>>> 32b90d2f783f4f6db2785f3dcba0953584cc9a6d
+
+#RUN sh /opt/kinova/GUI/DevelopmentCenter.sh 
+
+<<<<<<< HEAD
 # Source ROS2
 # TODO: change /home to ~ or $HOME
 #RUN /bin/bash -c "source /opt/ros/$ROS_DISTRO/setup.bash && source /home/user/ws/franka_ros2_ws/install/setup.bash"
 
 RUN echo 'source /opt/ros/$ROS_DISTRO/setup.bash &&\
 	source $HOME/ws/franka_ros2_ws/install/setup.sh' >> $HOME/.bashrc
+=======
 
-#CMD ["ros2", "launch", "franka_moveit_config", "moveit.launch.py", "robot_ip:=172.16.10.1"]
+#RUN echo 'ros2 launch kinova_bringup kinova_robot_launch.py' >> $HOME/.bashrc
+>>>>>>> 32b90d2f783f4f6db2785f3dcba0953584cc9a6d
 
-RUN echo 'ros2 launch franka_moveit_config moveit.launch.py robot_ip:=172.16.10.1' >> $HOME/.bashrc
+#COPY servo_teleop.launch.py $HOME/ws_moveit2_tut/src/moveit2_tutorials/doc/examples/realtime_servo/launch/
 
+
+<<<<<<< HEAD
 # source /opt/ros/$ROS_DISTRO/setup.bash && source /home/user/ws/franka_ros2_ws/install/setup.bash
+=======
+>>>>>>> 32b90d2f783f4f6db2785f3dcba0953584cc9a6d
 
-# ros2 launch franka_bringup franka.launch.py robot_ip:=172.16.10.1 use_rviz:=true
-# ros2 launch franka_moveit_config moveit.launch.py robot_ip:=172.16.10.1
-# ros2 launch franka_moveit_config moveit.launch.py robot_ip:=172.16.10.1
+### Run stuff 
+# "Normal"
+#RUN echo 'ros2 launch kinova_bringup kinova_robot_launch.py' >> $HOME/.bashrc
 
+# Interactive mode
+#RUN echo 'ros2 run kinova_driver kinova_interactive_control j2n6s300' >> $HOME/.bashrc
+# Moveit
+#RUN echo 'ros2 run kinova_driver joint_trajectory_action_server j2n6s300' >> $HOME/.bashrc
+#RUN echo 'ros2 run kinova_driver gripper_command_action_server j2n6s300' >> $HOME/.bashrc
+RUN echo 'ros2 launch kinova_bringup moveit_robot_launch.py' >> $HOME/.bashrc
 
 ## franka_ros2/franka_example_controllers/src/move_to_start_example_controller.cpp 
 
