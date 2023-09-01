@@ -12,7 +12,7 @@ docker run -it \
 	--net=host \
 	-v /dev/shm:/dev/shm \
 	-e "ROS_DOMAIN_ID=7" \
-	osrf/ros:foxy-desktop \
+	osrf/ros:humble-desktop \
 	rqt_graph
 
 export containerId=$(docker ps -l -q)

@@ -1,6 +1,7 @@
 xhost +local:root
 
-docker image build -t ros2-panda .     
+docker image build -t ros2-panda .    
+ 
 
 docker run -it \
 	--env="DISPLAY" \
