@@ -1,6 +1,6 @@
 xhost +local:root
 
-docker image build -t kinova-ros2 .    
+docker image build -t kinova-ros2 --build-arg DISPLAY=:0 --network=host .    
  
 docker run -it \
 	--env="DISPLAY" --device=/dev/video0:/dev/video0 \

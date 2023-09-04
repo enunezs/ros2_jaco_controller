@@ -1,4 +1,5 @@
 ARG ROS_DISTRO=humble
+ARG DISPLAY
 FROM ros:$ROS_DISTRO-ros-base as ros-kinova
 LABEL maintainer="Emanuel Nunez S gmail dot com"
 ENV HOME /root
@@ -69,7 +70,7 @@ RUN echo 'echo "Updating bash.rc" &&\
 	 
 
 ### Split here # Seems we dont need this!
-FROM ros-kinova as ros-kinova-SDK
+#FROM ros-kinova as ros-kinova-SDK
 #COPY --from=kinova-ros2 /bin/hello /bin/hello
 
 ## Install Jaco SDK
@@ -78,10 +79,19 @@ COPY Ubuntu $HOME/ws/kinova-ros2/sdk/
 WORKDIR $HOME/ws/kinova-ros2/sdk/64bits
 RUN sudo dpkg -i $HOME/ws/kinova-ros2/sdk/64bits/KinovaAPI-5.2.0-amd64.deb 
 
+WORKDIR $HOME/ws/
+### TEMP ONLY
+### Split here # Seems we dont need this!
+#FROM ros-kinova as ros-kinova-SDK
 #./jaco2Install64_1.0.0 # sh /root/ws/kinova-ros2/sdk/64bits/jaco2Install64_1.0.0
 
 WORKDIR $HOME/ws/
-RUN echo '$HOME/ws/kinova-ros2/sdk/64bits/jaco2Install64_1.0.0 # sh /root/ws/kinova-ros2/sdk/64bits/jaco2Install64_1.0.0' >> $HOME/.bashrc
+
+#FROM x11docker/fvwm
+ARG DISPLAY
+RUN apt-get update && apt-get install -y \ 
+	xterm
+RUN sudo xterm ./kinova-ros2/sdk/64bits/jaco2Install64_1.0.0
 
 
 #RUN sh /opt/kinova/GUI/DevelopmentCenter.sh 
@@ -102,6 +112,6 @@ RUN echo '$HOME/ws/kinova-ros2/sdk/64bits/jaco2Install64_1.0.0 # sh /root/ws/kin
 # Moveit
 #RUN echo 'ros2 run kinova_driver joint_trajectory_action_server j2n6s300' >> $HOME/.bashrc
 #RUN echo 'ros2 run kinova_driver gripper_command_action_server j2n6s300' >> $HOME/.bashrc
-RUN echo 'ros2 launch kinova_bringup moveit_robot_launch.py' >> $HOME/.bashrc
+#RUN echo 'ros2 launch kinova_bringup moveit_robot_launch.py' >> $HOME/.bashrc
 
 
