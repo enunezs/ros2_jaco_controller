@@ -87,7 +87,7 @@ RUN echo 'source /opt/ros/foxy/setup.bash &&\
 
 #CMD ["ros2", "launch", "franka_moveit_config", "moveit.launch.py", "robot_ip:=172.16.10.1"]
 
-RUN echo 'ros2 launch franka_moveit_config moveit.launch.py robot_ip:=172.16.10.1' >> $HOME/.bashrc
+RUN echo 'ros2 launch franka_moveit_config moveit.launch.py robot_ip:=172.16.10' >> $HOME/.bashrc
 
 # source /opt/ros/foxy/setup.bash && source /home/user/ws/franka_ros2_ws/install/setup.bash
 
@@ -100,10 +100,11 @@ RUN echo 'ros2 launch franka_moveit_config moveit.launch.py robot_ip:=172.16.10.
 
 ## franka_ros2/franka_example_controllers/src/move_to_start_example_controller.cpp 
 
-WORKDIR $HOME/ws/
-COPY move_to_start_example_controller.cpp  $HOME/ws/franka_ros2_ws/src/franka_ros2/franka_example_controllers/src/
-RUN source /opt/ros/foxy/setup.bash && \ 
-	source franka_ros2_ws/install/setup.sh && \
-	colcon build --packages-select franka_example_controllers
+
+#WORKDIR $HOME/ws/
+#COPY move_to_start_example_controller.cpp  $HOME/ws/franka_ros2_ws/src/franka_ros2/franka_example_controllers/src/
+#RUN source /opt/ros/foxy/setup.bash && \ 
+#	source franka_ros2_ws/install/setup.sh && \
+#	colcon build --packages-select franka_example_controllers
 	
 
