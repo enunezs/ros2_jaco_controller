@@ -1,12 +1,18 @@
 ARG ROS_DISTRO=humble
+
 ARG DISPLAY
+
+
 FROM ros:$ROS_DISTRO-ros-base as ros-kinova
+
 LABEL maintainer="Emanuel Nunez S gmail dot com"
 ENV HOME /root
 WORKDIR $HOME
 SHELL ["/bin/bash", "-c"]
 
+
 # As per instructions on https://github.com/RRL-ALeRT/kinova-ros2
+
 
 # general utilities
 RUN apt-get update && apt-get install -y \
@@ -43,7 +49,9 @@ RUN apt-get update && apt-get install -y \
 # RUN apt-get update &&  apt-get dist-upgrade -y
 
 # SET ENVIRONMENT
+
 #WORKDIR $HOME/ws/kinova-ros2/
+
 
 #### Step 1: Setup: building franka_ros2
 
@@ -95,12 +103,17 @@ RUN apt-get update && apt-get install -y \
 RUN sudo xterm ./kinova-ros2/sdk/64bits/jaco2Install64_1.0.0
 
 
+
 #RUN sh /opt/kinova/GUI/DevelopmentCenter.sh 
+
 
 
 #RUN echo 'ros2 launch kinova_bringup kinova_robot_launch.py' >> $HOME/.bashrc
 
+
 #COPY servo_teleop.launch.py $HOME/ws_moveit2_tut/src/moveit2_tutorials/doc/examples/realtime_servo/launch/
+
+
 
 
 ### Run stuff 
@@ -113,6 +126,15 @@ RUN sudo xterm ./kinova-ros2/sdk/64bits/jaco2Install64_1.0.0
 #RUN echo 'ros2 run kinova_driver joint_trajectory_action_server j2n6s300' >> $HOME/.bashrc
 #RUN echo 'ros2 run kinova_driver gripper_command_action_server j2n6s300' >> $HOME/.bashrc
 #RUN echo 'ros2 launch kinova_bringup moveit_robot_launch.py' >> $HOME/.bashrc
+
+## franka_ros2/franka_example_controllers/src/move_to_start_example_controller.cpp 
+
+WORKDIR $HOME/ws/
+COPY move_to_start_example_controller.cpp  $HOME/ws/franka_ros2_ws/src/franka_ros2/franka_example_controllers/src/
+RUN source /opt/ros/$ROS_DISTRO/setup.bash && \ 
+	source franka_ros2_ws/install/setup.sh && \
+	colcon build --packages-select franka_example_controllers
+	
 
 ## franka_ros2/franka_example_controllers/src/move_to_start_example_controller.cpp 
 

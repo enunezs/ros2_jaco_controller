@@ -1,7 +1,11 @@
 xhost +local:root
 
-docker image build -t kinova-ros2 --build-arg DISPLAY=:0 --network=host .    
+
+
+docker image build -t kinova-ros2 .    
+
  
+
 docker run -it \
 	--env="DISPLAY" --device=/dev/video0:/dev/video0 \
 	-e DISPLAY=$DISPLAY --env="QT_X11_NO_MITSHM=1" \
