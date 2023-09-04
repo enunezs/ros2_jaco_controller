@@ -115,7 +115,6 @@ RUN sudo xterm ./kinova-ros2/sdk/64bits/jaco2Install64_1.0.0
 
 
 
-
 ### Run stuff 
 # "Normal"
 #RUN echo 'ros2 launch kinova_bringup kinova_robot_launch.py' >> $HOME/.bashrc
@@ -129,11 +128,14 @@ RUN sudo xterm ./kinova-ros2/sdk/64bits/jaco2Install64_1.0.0
 
 ## franka_ros2/franka_example_controllers/src/move_to_start_example_controller.cpp 
 
-WORKDIR $HOME/ws/
-COPY move_to_start_example_controller.cpp  $HOME/ws/franka_ros2_ws/src/franka_ros2/franka_example_controllers/src/
-RUN source /opt/ros/$ROS_DISTRO/setup.bash && \ 
-	source franka_ros2_ws/install/setup.sh && \
-	colcon build --packages-select franka_example_controllers
+
+
+#WORKDIR $HOME/ws/
+#COPY move_to_start_example_controller.cpp  $HOME/ws/franka_ros2_ws/src/franka_ros2/franka_example_controllers/src/
+#RUN source /opt/ros/foxy/setup.bash && \ 
+#	source franka_ros2_ws/install/setup.sh && \
+#	colcon build --packages-select franka_example_controllers
+
 	
 
 ## franka_ros2/franka_example_controllers/src/move_to_start_example_controller.cpp 
