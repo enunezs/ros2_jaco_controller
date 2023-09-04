@@ -1,24 +1,12 @@
 ARG ROS_DISTRO=humble
-<<<<<<< .merge_file_QcC6N4
 ARG DISPLAY
-=======
-<<<<<<< HEAD
-FROM ros:$ROS_DISTRO-ros-base
-=======
->>>>>>> .merge_file_wWOwY9
 FROM ros:$ROS_DISTRO-ros-base as ros-kinova
->>>>>>> 32b90d2f783f4f6db2785f3dcba0953584cc9a6d
 LABEL maintainer="Emanuel Nunez S gmail dot com"
 ENV HOME /root
 WORKDIR $HOME
 SHELL ["/bin/bash", "-c"]
 
-<<<<<<< HEAD
-# As per instructions on
-# https://support.franka.de/docs/franka_ros2.html
-=======
 # As per instructions on https://github.com/RRL-ALeRT/kinova-ros2
->>>>>>> 32b90d2f783f4f6db2785f3dcba0953584cc9a6d
 
 # general utilities
 RUN apt-get update && apt-get install -y \
@@ -55,15 +43,7 @@ RUN apt-get update && apt-get install -y \
 # RUN apt-get update &&  apt-get dist-upgrade -y
 
 # SET ENVIRONMENT
-<<<<<<< HEAD
-WORKDIR $HOME/ws/franka_emika_panda/
- 
-#### Step 0: Prerequisites: building and setting up libfranka (ROS version independent)
-# Done
-# Known bug, no real time system
-=======
 #WORKDIR $HOME/ws/kinova-ros2/
->>>>>>> 32b90d2f783f4f6db2785f3dcba0953584cc9a6d
 
 #### Step 1: Setup: building franka_ros2
 
@@ -89,17 +69,6 @@ RUN echo 'echo "Updating bash.rc" &&\
 	 export LC_NUMERIC=en_US.UTF-8' >> $HOME/.bashrc
 	 
 
-<<<<<<< HEAD
-#### Step 1: Setup: building franka_ros2
-
-WORKDIR $HOME/ws/
-RUN mkdir -p franka_ros2_ws/src   && \ 
-	cd $HOME/ws/franka_ros2_ws && \
-	git clone https://github.com/frankaemika/franka_ros2.git src/franka_ros2 && \
-	source /opt/ros/$ROS_DISTRO/setup.bash && \
-	colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release && \
-	source install/setup.sh
-=======
 ### Split here # Seems we dont need this!
 #FROM ros-kinova as ros-kinova-SDK
 #COPY --from=kinova-ros2 /bin/hello /bin/hello
@@ -118,35 +87,21 @@ WORKDIR $HOME/ws/
 
 WORKDIR $HOME/ws/
 
+
 #FROM x11docker/fvwm
 ARG DISPLAY
 RUN apt-get update && apt-get install -y \ 
 	xterm
 RUN sudo xterm ./kinova-ros2/sdk/64bits/jaco2Install64_1.0.0
 
->>>>>>> 32b90d2f783f4f6db2785f3dcba0953584cc9a6d
 
 #RUN sh /opt/kinova/GUI/DevelopmentCenter.sh 
 
-<<<<<<< HEAD
-# Source ROS2
-# TODO: change /home to ~ or $HOME
-#RUN /bin/bash -c "source /opt/ros/$ROS_DISTRO/setup.bash && source /home/user/ws/franka_ros2_ws/install/setup.bash"
-
-RUN echo 'source /opt/ros/$ROS_DISTRO/setup.bash &&\
-	source $HOME/ws/franka_ros2_ws/install/setup.sh' >> $HOME/.bashrc
-=======
 
 #RUN echo 'ros2 launch kinova_bringup kinova_robot_launch.py' >> $HOME/.bashrc
->>>>>>> 32b90d2f783f4f6db2785f3dcba0953584cc9a6d
 
 #COPY servo_teleop.launch.py $HOME/ws_moveit2_tut/src/moveit2_tutorials/doc/examples/realtime_servo/launch/
 
-
-<<<<<<< HEAD
-# source /opt/ros/$ROS_DISTRO/setup.bash && source /home/user/ws/franka_ros2_ws/install/setup.bash
-=======
->>>>>>> 32b90d2f783f4f6db2785f3dcba0953584cc9a6d
 
 ### Run stuff 
 # "Normal"
@@ -158,6 +113,15 @@ RUN echo 'source /opt/ros/$ROS_DISTRO/setup.bash &&\
 #RUN echo 'ros2 run kinova_driver joint_trajectory_action_server j2n6s300' >> $HOME/.bashrc
 #RUN echo 'ros2 run kinova_driver gripper_command_action_server j2n6s300' >> $HOME/.bashrc
 #RUN echo 'ros2 launch kinova_bringup moveit_robot_launch.py' >> $HOME/.bashrc
+
+## franka_ros2/franka_example_controllers/src/move_to_start_example_controller.cpp 
+
+WORKDIR $HOME/ws/
+COPY move_to_start_example_controller.cpp  $HOME/ws/franka_ros2_ws/src/franka_ros2/franka_example_controllers/src/
+RUN source /opt/ros/$ROS_DISTRO/setup.bash && \ 
+	source franka_ros2_ws/install/setup.sh && \
+	colcon build --packages-select franka_example_controllers
+	
 
 ## franka_ros2/franka_example_controllers/src/move_to_start_example_controller.cpp 
 
