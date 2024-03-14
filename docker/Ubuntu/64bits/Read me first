@@ -1,0 +1,7 @@
+To install the complete package, please execute the script installSDK64.sh
+
+- The script will ask for root privilege to install all the components
+- The default installation folder is in /opt/kinova
+- At the root of the package, you will find 2 icon files: SDK.png(Development center) and Icon_torque(Torque console). They can be used to launchers and shortcuts.
+
+If you encounter any problem, please contact support@kinovarobotics.com
