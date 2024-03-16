@@ -14,7 +14,7 @@ docker run -it \
 	--volume $(pwd)/:/root/ws/jacoarm-ros2 \
 	--volume /dev/shm:/dev/shm \
 	-u 0 \
-	enunezs/kinova-ros2:1.0
+	enunezs/kinova-ros2:1.1
 
 export containerId=$(docker ps -l -q)
 

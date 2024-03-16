@@ -104,7 +104,7 @@ RUN apt-get update && apt-get install -y \
 RUN echo 'alias python="python3"' >> $HOME/.bashrc
 RUN echo 'source /opt/ros/humble/setup.sh && colcon build' >> $HOME/.bashrc
 RUN echo 'source install/setup.bash' >> $HOME/.bashrc
-#RUN echo 'source /opt/ros/$ROS_DISTRO/setup.sh && colcon build --packages-select my_jaco_controller' >> $HOME/.bashrc
+#RUN echo 'source /opt/ros/$ROS_DISTRO/setup.sh && colcon build --packages-select ros2_jaco_controller' >> $HOME/.bashrc
 
 
 

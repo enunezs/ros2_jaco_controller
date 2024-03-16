@@ -38,7 +38,7 @@ def generate_launch_description():
     # ! Errors here
 
     """jaco_controller_node = Node(
-        package="my_jaco_controller",
+        package="ros2_jaco_controller",
         executable="all_purpose_controller.py",
         name="jaco_controller",
         #parameters=["/config/params.yaml"],
