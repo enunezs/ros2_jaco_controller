@@ -21,7 +21,7 @@ import numpy as np
 
 from enum import Enum
 
-# Movement enabled? Useful for testing
+"""# Movement enabled? Useful for testing
 CARTESIAN_MOVEMENT_ENABLED = True
 CAMERA_ROTATION_COMPENSATION = False
 
@@ -38,7 +38,7 @@ RELATIVE_CARTESIAN_MOVEMENT_ENABLED = False
 
 # ROTATION
 DISCRETISE_ROTATION = True
-QUANTISATION = 30.0
+QUANTISATION = 30.0"""
 
 class ControlMode(Enum):
     GLOBAL = 0
@@ -48,7 +48,6 @@ class ControlMode(Enum):
 
 active_control_mode = ControlMode.RELATIVE_EE
 
-
 # ! Keep at 100Hz. As per documentation
 REFRESH_RATE = 100.0
 
@@ -57,7 +56,7 @@ REFRESH_RATE = 100.0
 
 class JacoController(Node):
     def __init__(self):
-        super().__init__('jaco_simple_pid_controller')
+        super().__init__('jaco_main_controller')
         self.get_logger().info("Robot control node is Running...")
 
         # Create subscribers
@@ -72,6 +71,17 @@ class JacoController(Node):
         self.dynamic_broadcaster = TransformBroadcaster(self)
 
         self.update = self.create_timer(1.0/REFRESH_RATE, self.update_controller)
+
+        # Parameters
+        self.MAX_LINEAR_VELOCITY = self.declare_and_get_parameter('max_linear_velocity', 0.070)
+        self.MAX_ANGULAR_VELOCITY = self.declare_and_get_parameter('max_angular_velocity', 2.0)
+        self.MAX_FINGER_VELOCITY = self.declare_and_get_parameter('max_finger_velocity', 2000.0)
+        self.CARTESIAN_MOVEMENT_ENABLED = self.declare_and_get_parameter('cartesian_movement_enabled', True)
+        self.CAMERA_ROTATION_COMPENSATION = self.declare_and_get_parameter('camera_rotation_compensation', False)
+        self.NORMALISE_CARTESIAN_SPEED = self.declare_and_get_parameter('normalise_cartesian_speed', False)
+        self.RELATIVE_CARTESIAN_MOVEMENT_ENABLED = self.declare_and_get_parameter('relative_cartesian_movement_enabled', False)
+        self.DISCRETISE_ROTATION = self.declare_and_get_parameter('discretise_rotation', True)
+        self.QUANTISATION = self.declare_and_get_parameter('quantisation', 30.0)
 
         # Robot state
         self.target_pose = None
@@ -91,16 +101,28 @@ class JacoController(Node):
         self.roll = 0 
         self.pitch = 0
 
+    def declare_and_get_parameter(self, name, default):
+        self.declare_parameter(name, default)
+        self.get_logger().info(
+            f"Loaded parameter {name}: {self.get_parameter(name).value}"
+        )
+        return self.get_parameter(name).value
+
     ### MAIN CALLBACK ### 
     def update_controller(self):
 
         # Only update if we have all needed data: controller and current pose
-        # TODO check time stamps are recent 
         if self.joy_msg is None or self.current_pose is None :
             return
 
-        try:
+        """# TODO check time stamps are at least less than 0.1s apart
+        current_time = self.get_clock().now()
+        if self.joy_msg.header.stamp.sec == 0 or self.current_pose.header.stamp.sec == 0:
+            return
+        if (current_time - self.joy_msg.header.stamp).nanoseconds > 1e9 or (current_time - self.current_pose.header.stamp).nanoseconds > 1e9:
+            return"""
 
+        try:
             ### Preprocess discrete actions
             self.discrete_actions(self.joy_msg)
 
@@ -201,7 +223,7 @@ class JacoController(Node):
     def find_linear_velocity(self, joy_msg) -> np.ndarray:
 
         # If cartesian movement is disabled, return 0,0,0
-        if not CARTESIAN_MOVEMENT_ENABLED:
+        if not self.CARTESIAN_MOVEMENT_ENABLED:
             return np.zeros(3)
 
         # Target vel update
@@ -214,11 +236,11 @@ class JacoController(Node):
         
         
         # Normalise and multiply by max velocity
-        if NORMALISE_CARTESIAN_SPEED :
+        if self.NORMALISE_CARTESIAN_SPEED :
             cartesian_vel_target = cartesian_vel_target / np.linalg.norm(cartesian_vel_target)
             
         # Multiply by max velocity
-        cartesian_vel_target = cartesian_vel_target * MAX_LINEAR_VELOCITY
+        cartesian_vel_target = cartesian_vel_target * self.MAX_LINEAR_VELOCITY
 
         return cartesian_vel_target
     
@@ -264,7 +286,7 @@ class JacoController(Node):
         self.cumulative_rotation += orientation_change * (1.0 / REFRESH_RATE) # Not accurate!
         controller_target_rotation = self.cumulative_rotation
         # Discretise
-        if DISCRETISE_ROTATION:
+        if self.DISCRETISE_ROTATION:
             controller_target_rotation = np.round(controller_target_rotation / QUANTISATION) * QUANTISATION
         self.get_logger().info(f"Discretised rotation: {controller_target_rotation}")
 
@@ -366,18 +388,18 @@ class JacoController(Node):
         #euler_velocity_target = self.rotation_euler_target * MAX_ANGULAR_VELOCITY
 
         euler_velocity_target = np.zeros(3)
-        euler_velocity_target[0] = self.rotation_euler_target[0] * MAX_ANGULAR_VELOCITY
-        euler_velocity_target[1] = self.rotation_euler_target[1] * MAX_ANGULAR_VELOCITY
-        euler_velocity_target[2] = self.rotation_euler_target[2] * MAX_ANGULAR_VELOCITY 
+        euler_velocity_target[0] = self.rotation_euler_target[0] * self.MAX_ANGULAR_VELOCITY
+        euler_velocity_target[1] = self.rotation_euler_target[1] * self.MAX_ANGULAR_VELOCITY
+        euler_velocity_target[2] = self.rotation_euler_target[2] * self.MAX_ANGULAR_VELOCITY 
 
         return euler_velocity_target
 
     def find_finger_velocity(self, joy_msg:Joy) -> np.ndarray:
         # A - B
         finger_target_velocity = np.zeros(3)
-        finger_target_velocity[0] = (self.joy_msg.buttons[1] - self.joy_msg.buttons[0]) * MAX_FINGER_VELOCITY
-        finger_target_velocity[1] = (self.joy_msg.buttons[1] - self.joy_msg.buttons[0]) * MAX_FINGER_VELOCITY
-        finger_target_velocity[2] = (self.joy_msg.buttons[1] - self.joy_msg.buttons[0]) * MAX_FINGER_VELOCITY
+        finger_target_velocity[0] = (self.joy_msg.buttons[1] - self.joy_msg.buttons[0]) * self.MAX_FINGER_VELOCITY
+        finger_target_velocity[1] = (self.joy_msg.buttons[1] - self.joy_msg.buttons[0]) * self.MAX_FINGER_VELOCITY
+        finger_target_velocity[2] = (self.joy_msg.buttons[1] - self.joy_msg.buttons[0]) * self.MAX_FINGER_VELOCITY
 
         return finger_target_velocity
 

@@ -35,14 +35,12 @@ def generate_launch_description():
     launch_description.add_action(moveit_robot_launch)
 
     # Controller
-    # ! Errors here
-
-    """jaco_controller_node = Node(
+    jaco_controller_node = Node(
         package="ros2_jaco_controller",
         executable="all_purpose_controller.py",
-        name="jaco_controller",
-        #parameters=["/config/params.yaml"],
+        name="jaco_main_controller",
+        parameters=["/config/params.yaml"],
     )
-    launch_description.add_action(jaco_controller_node)"""
+    launch_description.add_action(jaco_controller_node)
 
     return launch_description

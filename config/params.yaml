@@ -1,3 +1,13 @@
-/ros2_jaco_controller:
+/jaco_simple_pid_controller:
   ros__parameters:
     dummy: 0.0
+    max_linear_velocity: 0.070 # m/s
+    max_angular_velocity: 2.0 # rad/s
+    max_finger_velocity: 2000.0 # mm/s
+    normalise_cartesian_speed: False
+    relative_cartesian_movement_enabled: False
+    rotation_assistance: 2.0 # ?
+    rotation_integration: 0.01 #?
+    cartesian_movement_enabled: True
+    discretise_rotation: True
+    discretisation_value: 30.0 # deg
