@@ -1,7 +1,7 @@
 #!/bin/bash
 xhost +local:root
 
-docker pull enunezs/kinova-ros2:1.1 
+docker pull enunezs/kinova-ros2:1.2
 
 docker run -it \
 	--device=/dev/video0:/dev/video0 \
@@ -14,7 +14,7 @@ docker run -it \
 	--volume $(pwd)/:/root/ws/jacoarm-ros2 \
 	--volume /dev/shm:/dev/shm \
 	-u 0 \
-	enunezs/kinova-ros2:1.1
+	enunezs/kinova-ros2:1.2
 
 export containerId=$(docker ps -l -q)
 

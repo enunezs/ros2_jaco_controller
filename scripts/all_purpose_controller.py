@@ -37,7 +37,7 @@ NORMALISE_CARTESIAN_SPEED = False
 RELATIVE_CARTESIAN_MOVEMENT_ENABLED = False
 
 # ROTATION
-DISCRETISE_ROTATION = True
+DISCRETISE_ROTATION = False
 QUANTISATION = 30.0
 
 class ControlMode(Enum):
@@ -48,8 +48,7 @@ class ControlMode(Enum):
 
 active_control_mode = ControlMode.RELATIVE_EE
 
-
-# ! Keep at 100Hz. As per documentation
+# ! LOCK at 100Hz. As per documentation
 REFRESH_RATE = 100.0
 
 # ros2 service call /j2n6s300_driver/in/set_torque_control_mode kinova_msgs/srv/SetTorqueControlMode state:\ 1\
@@ -63,6 +62,7 @@ class JacoController(Node):
         # Create subscribers
         self.joy_sub = self.create_subscription(Joy, '/joy', self.update_target_pose, 10)
         self.pose_sub = self.create_subscription(PoseStamped, '/j2n6s300_driver/out/tool_pose', self.update_current_pose, 10)
+
 
         self.tf_target_buffer = Buffer()
         self.tf_target_listener = TransformListener(self.tf_target_buffer, self)
@@ -127,6 +127,8 @@ class JacoController(Node):
             # TODO: Implement PID for rotation
             # Decouple the rotation and linear velocity
             # library? or class?
+            command_vel = PID_controller(target_vel, current_vel) #, rotation_vel_target, current_ee_rotation)
+
                 
             ### Pack pose goal into message ###
             target_vel_msg = PoseVelocityWithFingerVelocity() 
