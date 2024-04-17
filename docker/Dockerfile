@@ -106,6 +106,7 @@ RUN echo 'source /opt/ros/humble/setup.sh && colcon build' >> $HOME/.bashrc
 RUN echo 'source install/setup.bash' >> $HOME/.bashrc
 #RUN echo 'source /opt/ros/$ROS_DISTRO/setup.sh && colcon build --packages-select ros2_jaco_controller' >> $HOME/.bashrc
 
+# colcon build --symlink-install --packages-select kinova_msgs kinova_bringup kinova_driver kinova_description kinova_demo
 
 
 

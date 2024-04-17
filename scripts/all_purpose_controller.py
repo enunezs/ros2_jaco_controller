@@ -10,6 +10,7 @@ from geometry_msgs.msg import PoseStamped, WrenchStamped, Pose
 from tf2_ros.buffer import Buffer
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 from kinova_msgs.msg import PoseVelocity, PoseVelocityWithFingerVelocity
+from geometry_msgs.msg import Point
 
 from tf2_ros.transform_listener import TransformListener
 
@@ -26,7 +27,7 @@ CARTESIAN_MOVEMENT_ENABLED = True
 CAMERA_ROTATION_COMPENSATION = False
 
 # Constants for max velocities
-MAX_LINEAR_VELOCITY = 0.070    # m/s
+MAX_LINEAR_VELOCITY = 0.050    # m/s
 MAX_ANGULAR_VELOCITY = 2.0      
 MAX_FINGER_VELOCITY = 2000.0    # mm/s
 ROTATION_ASSISTANCE = 2.0
@@ -37,7 +38,7 @@ NORMALISE_CARTESIAN_SPEED = False
 RELATIVE_CARTESIAN_MOVEMENT_ENABLED = False
 
 # ROTATION
-DISCRETISE_ROTATION = False
+DISCRETISE_ROTATION = True
 QUANTISATION = 30.0
 
 class ControlMode(Enum):
@@ -54,6 +55,64 @@ REFRESH_RATE = 100.0
 # ros2 service call /j2n6s300_driver/in/set_torque_control_mode kinova_msgs/srv/SetTorqueControlMode state:\ 1\
 # ros2 service call /j2n6s300_driver/in/start kinova_msgs/srv/Start {}\ 
 
+## PID params
+kp_linear = 0.50 # 12.5
+ki_linear =  0 #0.01
+kd_linear = 0
+
+kp_angular = 1
+ki_angular = 0
+kd_angular = 0
+
+
+import numpy as np
+
+class PIDController:
+    def __init__(self, kp=1.0, ki=0.0, kd=0.0, refresh_rate=1.0,length=3):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.refresh_rate = refresh_rate
+        self.length = length
+        self.prev_error = np.zeros(self.length)
+        self.integral_error = np.zeros(self.length)
+        self.derivative_error = np.zeros(self.length)
+
+    def update_parameters(self, kp=None, ki=None, kd=None, refresh_rate=None):
+        if kp is not None:
+            self.kp = kp
+        if ki is not None:
+            self.ki = ki
+        if kd is not None:
+            self.kd = kd
+        if refresh_rate is not None:
+            self.refresh_rate = refresh_rate
+
+    def control_update(self, target_vel, current_vel):
+        if target_vel is None or current_vel is None:
+            return np.zeros(self.length)
+
+        current_error = target_vel - current_vel
+
+        self.integral_error += current_error * (1.0 / self.refresh_rate)
+        self.derivative_error = (current_error - self.prev_error) * self.refresh_rate
+
+        self.prev_error = current_error
+
+        return self.kp * current_error + self.ki * self.integral_error + self.kd * self.derivative_error
+
+class MovingAverageFilter:
+    def __init__(self, window_size):
+        self.window_size = window_size
+        self.values = []
+
+    def update(self, value):
+        self.values.append(value)
+        if len(self.values) > self.window_size:
+            self.values.pop(0)
+        return np.mean(self.values)
+
+
 class JacoController(Node):
     def __init__(self):
         super().__init__('jaco_simple_pid_controller')
@@ -62,7 +121,7 @@ class JacoController(Node):
         # Create subscribers
         self.joy_sub = self.create_subscription(Joy, '/joy', self.update_target_pose, 10)
         self.pose_sub = self.create_subscription(PoseStamped, '/j2n6s300_driver/out/tool_pose', self.update_current_pose, 10)
-
+        self.force_sub = self.create_subscription(WrenchStamped, '/j2n6s300_driver/out/tool_wrench', self.update_current_force, 10)
 
         self.tf_target_buffer = Buffer()
         self.tf_target_listener = TransformListener(self.tf_target_buffer, self)
@@ -70,6 +129,9 @@ class JacoController(Node):
         # Create publishers
         self.vel_pub = self.create_publisher(PoseVelocityWithFingerVelocity, '/j2n6s300_driver/in/cartesian_velocity_with_finger_velocity', 1)
         self.dynamic_broadcaster = TransformBroadcaster(self)
+
+        self.test_target_vel_pub = self.create_publisher(Point, '/jaco/test_target_vel_pub', 1)
+        self.test_measured_vel_pub = self.create_publisher(Point, '/jaco/test_measured_vel_pub', 1)
 
         self.update = self.create_timer(1.0/REFRESH_RATE, self.update_controller)
 
@@ -91,6 +153,11 @@ class JacoController(Node):
         self.roll = 0 
         self.pitch = 0
 
+        # PID
+        self.PID_linear_vel = PIDController(kp=kp_linear, ki=ki_linear, kd=kd_linear, refresh_rate=REFRESH_RATE)
+        self.PID_angular_vel = PIDController(kp=kp_angular, ki=ki_angular, kd=kd_angular, refresh_rate=REFRESH_RATE)
+        self.vel_filter = MovingAverageFilter(window_size=10)
+
     ### MAIN CALLBACK ### 
     def update_controller(self):
 
@@ -98,7 +165,6 @@ class JacoController(Node):
         # TODO check time stamps are recent 
         if self.joy_msg is None or self.current_pose is None :
             return
-
         try:
 
             ### Preprocess discrete actions
@@ -123,11 +189,19 @@ class JacoController(Node):
                 rotation_vel_target = np.zeros(3)
 
             ### PID ###
-            # Generate a velocity for the rotation target using PID
-            # TODO: Implement PID for rotation
             # Decouple the rotation and linear velocity
-            # library? or class?
-            command_vel = PID_controller(target_vel, current_vel) #, rotation_vel_target, current_ee_rotation)
+        
+            if self.current_vel is not None:
+                self.get_logger().info(f"{target_vel}")
+                self.get_logger().info(f"{self.current_vel[0:3]}")
+
+                #Disable PID to check signals
+                target_vel = self.PID_linear_vel.control_update(target_vel, self.current_vel[0:3]) #, rotation_vel_target, current_ee_rotation)
+        
+                #self.test_measured_vel_pub.publish(Point(x=self.current_vel[0], y=self.current_vel[1], z=self.current_vel[2]))
+                self.test_target_vel_pub.publish(Point(x=target_vel[0], y=target_vel[1], z=target_vel[2]))
+
+            #command_angular_vel = self.PID_angular_vel.control_update(rotation_vel_target, self.current_vel) #, rotation_vel_target, current_ee_rotation)
 
                 
             ### Pack pose goal into message ###
@@ -384,6 +458,24 @@ class JacoController(Node):
         return finger_target_velocity
 
 
+    # Better to do as a class?
+    def PID_controller(self, target_vel:np.ndarray, current_vel:np.ndarray) -> np.ndarray:
+
+        if target_vel is None or current_vel is None: #  or self.current_force is None:
+            return np.zeros(6)
+        if self.prev_error is None:
+            self.prev_error = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+
+        current_error = target_vel - current_vel
+
+        self.integral_error += current_error * (1.0 / REFRESH_RATE)
+        
+        self.derivative_error = (current_error - self.prev_error) * REFRESH_RATE
+
+        prev_error = current_error
+        
+
     def get_frame(self, target_frame, source_frame):
         try:
             # Get the transform from the source frame to the target frame
@@ -417,7 +509,35 @@ class JacoController(Node):
 
     # Subscriber buffer callbacks
     def update_current_pose(self, pose_msg):
+        prev_pose = self.current_pose
         self.current_pose = pose_msg
+        self.update_current_vel(self.current_pose, prev_pose)
+
+
+
+
+    def update_current_vel(self, current_pose, prev_pose):
+        if prev_pose is None:
+            self.current_vel = np.zeros(6)
+            self.time_prev = self.get_clock().now().to_msg()
+            return
+        
+        
+        current_time = self.get_clock().now()
+        raw_vel = np.array([current_pose.pose.position.x - prev_pose.pose.position.x,
+                                     current_pose.pose.position.y - prev_pose.pose.position.y,
+                                     current_pose.pose.position.z - prev_pose.pose.position.z,
+                                     current_pose.pose.orientation.w - prev_pose.pose.orientation.w,
+                                     current_pose.pose.orientation.x - prev_pose.pose.orientation.x,
+                                     current_pose.pose.orientation.y - prev_pose.pose.orientation.y])* REFRESH_RATE
+        
+        self.current_vel = self.vel_filter.update(raw_vel)
+
+        #1.0/(current_time-self.time_prev)
+        
+        self.test_measured_vel_pub.publish(Point(x=self.current_vel[0], y=self.current_vel[1], z=self.current_vel[2]))
+        self.time_prev = current_time
+
 
     def update_current_force(self, force_msg):
         self.current_force = force_msg 
