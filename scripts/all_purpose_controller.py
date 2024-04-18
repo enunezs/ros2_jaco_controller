@@ -19,17 +19,10 @@ from enum import Enum
 from scipy.spatial.transform import Rotation # IMPORTANT, USES x,y,z,w
 
 import numpy as np
+import traceback
 
-
-# Movement enabled? Useful for testing
-CARTESIAN_MOVEMENT_ENABLED = True
-CAMERA_ROTATION_COMPENSATION = False
-PID_ENABLED = False
 
 # Constants for max velocities
-MAX_LINEAR_VELOCITY = 0.070     # m/s
-MAX_ANGULAR_VELOCITY = 2.0      # TODO CONFIRM
-MAX_FINGER_VELOCITY = 2000.0    # mm/s
 ROTATION_ASSISTANCE = 2.0   
 ROTATION_INTEGRATION = 0.01
 
@@ -39,8 +32,8 @@ RELATIVE_CARTESIAN_MOVEMENT_ENABLED = False
 
 # ROTATION
 DISCRETISE_ROTATION = True
-QUANTISATION = 30.0
 
+# Constants for control modes
 class ControlMode(Enum):
     GLOBAL = 0
     RELATIVE_EE = 1
@@ -101,17 +94,21 @@ class PIDController:
 
         return self.kp * current_error + self.ki * self.integral_error + self.kd * self.derivative_error
 
-class MovingAverageFilter:
+
+from collections import deque
+
+class RollingAverageFilter:
     def __init__(self, window_size):
         self.window_size = window_size
-        self.values = []
+        self.values = deque(maxlen=window_size)
+        self.sum = 0.0
 
     def update(self, value):
+        if len(self.values) == self.window_size:
+            self.sum -= self.values[0]
         self.values.append(value)
-        if len(self.values) > self.window_size:
-            self.values.pop(0)
-        return np.mean(self.values)
-
+        self.sum += value
+        return self.sum / len(self.values)
 
 class JacoController(Node):
     def __init__(self):
@@ -135,6 +132,34 @@ class JacoController(Node):
 
         self.update = self.create_timer(1.0/REFRESH_RATE, self.update_controller)
 
+        ### Parameters ### 
+        # Cartesian movement
+        self.cartesian_movement_enabled = self.declare_and_get_parameter("cartesian_movement_enabled", True)
+        self.normalise_cartesian_speed = self.declare_and_get_parameter("normalise_cartesian_speed", False)
+        self.relative_cartesian_movement_enabled = self.declare_and_get_parameter("relative_cartesian_movement_enabled", False)
+
+        # Max velocities
+        self.max_linear_velocity = self.declare_and_get_parameter("max_linear_velocity", 0.070)
+        self.max_angular_velocity = self.declare_and_get_parameter("max_angular_velocity", 2.0)
+        self.max_finger_velocity = self.declare_and_get_parameter("max_finger_velocity", 2000.0)
+
+        # Rotation
+        self.discretise_rotation = self.declare_and_get_parameter("discretise_rotation", True)
+        self.quantisation_degrees = self.declare_and_get_parameter("quantisation_degrees", 30.0)
+
+        # PID
+        self.pid_enabled = self.declare_and_get_parameter("pid_enabled", False)
+        self.kp_linear = self.declare_and_get_parameter("kp_linear", 1.0)
+        self.ki_linear = self.declare_and_get_parameter("ki_linear", 0.0)
+        self.kd_linear = self.declare_and_get_parameter("kd_linear", 0.0)
+        self.kp_angular = self.declare_and_get_parameter("kp_angular", 1.0)
+        self.ki_angular = self.declare_and_get_parameter("ki_angular", 0.0)
+        self.kd_angular = self.declare_and_get_parameter("kd_angular", 0.0)
+
+        # Camera rotation compensation
+        self.camera_rotation_compensation = self.declare_and_get_parameter("camera_rotation_compensation", False)
+        self.rotation_assistance = self.declare_and_get_parameter("rotation_assistance", 2.0)
+
         # Robot state
         self.target_pose = None
         self.current_pose = None
@@ -156,7 +181,16 @@ class JacoController(Node):
         # PID
         self.PID_linear_vel = PIDController(kp=kp_linear, ki=ki_linear, kd=kd_linear, refresh_rate=REFRESH_RATE)
         self.PID_angular_vel = PIDController(kp=kp_angular, ki=ki_angular, kd=kd_angular, refresh_rate=REFRESH_RATE)
-        self.vel_filter = MovingAverageFilter(window_size=10)
+
+        self.vel_filter = RollingAverageFilter(window_size=5)  # Adjust window_size as needed
+
+
+    def declare_and_get_parameter(self, name, default):
+        self.declare_parameter(name, default)
+        self.get_logger().info(
+            f"Loaded parameter {name}: {self.get_parameter(name).value}"
+        )
+        return self.get_parameter(name).value
 
     ### MAIN CALLBACK ### 
     def update_controller(self):
@@ -189,7 +223,7 @@ class JacoController(Node):
                 rotation_vel_target = np.zeros(3)
 
             ### PID ###
-            if PID_ENABLED and self.current_vel is not None:
+            if self.pid_enabled and self.current_vel is not None:
                 #self.get_logger().info(f"{target_vel}")
                 #self.get_logger().info(f"{self.current_vel[0:3]}")
         
@@ -274,7 +308,7 @@ class JacoController(Node):
     def find_linear_velocity(self, joy_msg) -> np.ndarray:
 
         # If cartesian movement is disabled, return 0,0,0
-        if not CARTESIAN_MOVEMENT_ENABLED:
+        if not self.cartesian_movement_enabled:
             return np.zeros(3)
 
         # Target vel update
@@ -291,7 +325,7 @@ class JacoController(Node):
             cartesian_vel_target = cartesian_vel_target / np.linalg.norm(cartesian_vel_target)
             
         # Multiply by max velocity
-        cartesian_vel_target = cartesian_vel_target * MAX_LINEAR_VELOCITY
+        cartesian_vel_target = cartesian_vel_target * self.max_linear_velocity
 
         return cartesian_vel_target
     
@@ -339,8 +373,8 @@ class JacoController(Node):
         controller_target_rotation = self.cumulative_rotation
         # Discretise
         if DISCRETISE_ROTATION:
-            controller_target_rotation = np.round(controller_target_rotation / QUANTISATION) * QUANTISATION
-        self.get_logger().info(f"Discretised rotation: {controller_target_rotation}")
+            controller_target_rotation = np.round(controller_target_rotation / self.quantisation_degrees) * self.quantisation_degrees
+        #self.get_logger().info(f"Discretised rotation: {controller_target_rotation}")
 
         # Apply
         rot_controller_target = Rotation.from_euler('xyz', [ controller_target_rotation[0], 
@@ -360,7 +394,7 @@ class JacoController(Node):
         try:
             glasses_from_marker = self.get_frame(target_frame, aligning_frame)
 
-            if not (glasses_from_marker is None) and CAMERA_ROTATION_COMPENSATION:
+            if not (glasses_from_marker is None) and self.camera_rotation_compensation:
 
                 # Up / down
                 # Easiest way, find angles and apply to the aligning frame
@@ -424,7 +458,7 @@ class JacoController(Node):
         # https://math.stackexchange.com/questions/3219887/downscale-quaternion
         MAX_ANGLE_DIFFERENCE = 3.14/4
         if mag > MAX_ANGLE_DIFFERENCE:
-            self.get_logger().info("ABOVE MAX ROTATION")
+            #self.get_logger().info("ABOVE MAX ROTATION")
             #self.get_logger().info(f"Max angle difference is: {mag * 180/3.14}")
         
             new_mag = MAX_ANGLE_DIFFERENCE
@@ -437,21 +471,21 @@ class JacoController(Node):
         self.rotation_euler_target = quaternion_diff.as_euler(convention, degrees=False) # Matches docs
 
         # Find angular velocity
-        #euler_velocity_target = self.rotation_euler_target * MAX_ANGULAR_VELOCITY
+        #euler_velocity_target = self.rotation_euler_target * self.max_angular_velocity
 
         euler_velocity_target = np.zeros(3)
-        euler_velocity_target[0] = self.rotation_euler_target[0] * MAX_ANGULAR_VELOCITY
-        euler_velocity_target[1] = self.rotation_euler_target[1] * MAX_ANGULAR_VELOCITY
-        euler_velocity_target[2] = self.rotation_euler_target[2] * MAX_ANGULAR_VELOCITY 
+        euler_velocity_target[0] = self.rotation_euler_target[0] * self.max_angular_velocity
+        euler_velocity_target[1] = self.rotation_euler_target[1] * self.max_angular_velocity
+        euler_velocity_target[2] = self.rotation_euler_target[2] * self.max_angular_velocity 
 
         return euler_velocity_target
 
     def find_finger_velocity(self, joy_msg:Joy) -> np.ndarray:
         # A - B
         finger_target_velocity = np.zeros(3)
-        finger_target_velocity[0] = (self.joy_msg.buttons[1] - self.joy_msg.buttons[0]) * MAX_FINGER_VELOCITY
-        finger_target_velocity[1] = (self.joy_msg.buttons[1] - self.joy_msg.buttons[0]) * MAX_FINGER_VELOCITY
-        finger_target_velocity[2] = (self.joy_msg.buttons[1] - self.joy_msg.buttons[0]) * MAX_FINGER_VELOCITY
+        finger_target_velocity[0] = (self.joy_msg.buttons[1] - self.joy_msg.buttons[0]) * self.max_finger_velocity
+        finger_target_velocity[1] = (self.joy_msg.buttons[1] - self.joy_msg.buttons[0]) * self.max_finger_velocity
+        finger_target_velocity[2] = (self.joy_msg.buttons[1] - self.joy_msg.buttons[0]) * self.max_finger_velocity
 
         return finger_target_velocity
 
@@ -509,7 +543,8 @@ class JacoController(Node):
     def update_current_pose(self, pose_msg):
         prev_pose = self.current_pose
         self.current_pose = pose_msg
-        self.update_current_vel(self.current_pose, prev_pose)
+        
+        #self.update_current_vel(self.current_pose, prev_pose)
 
 
 
@@ -517,17 +552,19 @@ class JacoController(Node):
     def update_current_vel(self, current_pose, prev_pose):
         if prev_pose is None:
             self.current_vel = np.zeros(6)
-            self.time_prev = self.get_clock().now().to_msg()
+            self.time_prev = self.get_clock().now()
+            self.get_clock().now()
             return
         
         
         current_time = self.get_clock().now()
+        duration = (current_time - self.time_prev).nanoseconds() * 1e-9
         raw_vel = np.array([current_pose.pose.position.x - prev_pose.pose.position.x,
                                      current_pose.pose.position.y - prev_pose.pose.position.y,
                                      current_pose.pose.position.z - prev_pose.pose.position.z,
                                      current_pose.pose.orientation.w - prev_pose.pose.orientation.w,
                                      current_pose.pose.orientation.x - prev_pose.pose.orientation.x,
-                                     current_pose.pose.orientation.y - prev_pose.pose.orientation.y])* REFRESH_RATE
+                                     current_pose.pose.orientation.y - prev_pose.pose.orientation.y])/ duration
         
         self.current_vel = self.vel_filter.update(raw_vel)
 
@@ -545,11 +582,13 @@ class JacoController(Node):
 
 def main():
     rclpy.init()
+    controller = JacoController()
     try:
-        controller = JacoController()
         rclpy.spin(controller)
     except Exception as e:
         print(f'Error in main: {e}')
+        traceback.print_exc()  # This will print the complete error stack trace
+
     finally:
         rclpy.shutdown()
 

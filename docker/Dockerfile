@@ -100,6 +100,7 @@ RUN apt-get update && apt-get install -y \
 	ros-$ROS_DISTRO-joy 
 
 #### SET ENVIRONMENT
+# colcon build --packages-select ros2_jaco_controller
 
 RUN echo 'alias python="python3"' >> $HOME/.bashrc
 RUN echo 'source /opt/ros/humble/setup.sh && colcon build' >> $HOME/.bashrc

@@ -34,19 +34,6 @@ def generate_launch_description():
     )
     launch_description.add_action(moveit_robot_launch)
 
-    # Controller
-    # ! Errors here
-    jaco_controller_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            [
-                os.path.join(get_package_share_directory("ros2_jaco_controller"), "launch"),
-                "/controller.launch.py",
-            ]
-        )
-    )
-    launch_description.add_action(jaco_controller_launch)
-
-
-    print("Complete set is Running...")
+    print("Pupil Neon Lunch is Running...")
 
     return launch_description

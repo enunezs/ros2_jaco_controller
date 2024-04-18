@@ -1,3 +1,20 @@
-/ros2_jaco_controller:
+/jaco_controller:
   ros__parameters:
-    dummy: 0.0
+    cartesian_movement_enabled: True
+    normalise_cartesian_speed: False
+    relative_cartesian_movement_enabled: True
+    max_linear_velocity: 0.070
+    max_angular_velocity: 2.0
+    max_finger_velocity: 2000.0
+    discretise_rotation: True
+    quantisation_degrees: 30.0
+    pid_enabled: False
+    kp_linear: 1.0
+    ki_linear: 0.0
+    kd_linear: 0.0
+    kp_angular: 1.0
+    ki_angular: 0.0
+    kd_angular: 0.0
+    camera_rotation_compensation: False
+    rotation_assistance: 2.0
+
