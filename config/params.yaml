@@ -2,8 +2,8 @@
   ros__parameters:
     cartesian_movement_enabled: True
     normalise_cartesian_speed: False
-    relative_cartesian_movement_enabled: True
-    max_linear_velocity: 0.070
+    relative_cartesian_movement_enabled: False
+    max_linear_velocity: 0.0450
     max_angular_velocity: 2.0
     max_finger_velocity: 2000.0
     discretise_rotation: True

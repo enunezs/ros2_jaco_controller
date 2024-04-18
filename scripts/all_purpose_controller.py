@@ -21,18 +21,6 @@ from scipy.spatial.transform import Rotation # IMPORTANT, USES x,y,z,w
 import numpy as np
 import traceback
 
-
-# Constants for max velocities
-ROTATION_ASSISTANCE = 2.0   
-ROTATION_INTEGRATION = 0.01
-
-# Constants for cartesian movement behaviour
-NORMALISE_CARTESIAN_SPEED = False
-RELATIVE_CARTESIAN_MOVEMENT_ENABLED = False
-
-# ROTATION
-DISCRETISE_ROTATION = True
-
 # Constants for control modes
 class ControlMode(Enum):
     GLOBAL = 0
@@ -48,24 +36,13 @@ REFRESH_RATE = 100.0
 # ros2 service call /j2n6s300_driver/in/set_torque_control_mode kinova_msgs/srv/SetTorqueControlMode state:\ 1\
 # ros2 service call /j2n6s300_driver/in/start kinova_msgs/srv/Start {}\ 
 
-## PID params
-kp_linear = 0.50 # 12.5
-ki_linear =  0 #0.01
-kd_linear = 0
-
-kp_angular = 1
-ki_angular = 0
-kd_angular = 0
 
 
 import numpy as np
 
 class PIDController:
     def __init__(self, kp=1.0, ki=0.0, kd=0.0, refresh_rate=1.0,length=3):
-        self.kp = kp
-        self.ki = ki
-        self.kd = kd
-        self.refresh_rate = refresh_rate
+        self.kp = kpself.
         self.length = length
         self.prev_error = np.zeros(self.length)
         self.integral_error = np.zeros(self.length)
@@ -179,8 +156,8 @@ class JacoController(Node):
         self.pitch = 0
 
         # PID
-        self.PID_linear_vel = PIDController(kp=kp_linear, ki=ki_linear, kd=kd_linear, refresh_rate=REFRESH_RATE)
-        self.PID_angular_vel = PIDController(kp=kp_angular, ki=ki_angular, kd=kd_angular, refresh_rate=REFRESH_RATE)
+        self.PID_linear_vel = PIDController(kp=self.kp_linear, ki=self.ki_linear, kd=self.kd_linear, refresh_rate=REFRESH_RATE)
+        self.PID_angular_vel = PIDController(kp=self.kp_angular, ki=self.ki_angular, kd=self.kd_angular, refresh_rate=REFRESH_RATE)
 
         self.vel_filter = RollingAverageFilter(window_size=5)  # Adjust window_size as needed
 
@@ -321,7 +298,7 @@ class JacoController(Node):
         
         
         # Normalise and multiply by max velocity
-        if NORMALISE_CARTESIAN_SPEED :
+        if self.normalise_cartesian_speed :
             cartesian_vel_target = cartesian_vel_target / np.linalg.norm(cartesian_vel_target)
             
         # Multiply by max velocity
@@ -372,7 +349,7 @@ class JacoController(Node):
         self.cumulative_rotation += orientation_change * (1.0 / REFRESH_RATE) # Not accurate!
         controller_target_rotation = self.cumulative_rotation
         # Discretise
-        if DISCRETISE_ROTATION:
+        if self.discretise_rotation:
             controller_target_rotation = np.round(controller_target_rotation / self.quantisation_degrees) * self.quantisation_degrees
         #self.get_logger().info(f"Discretised rotation: {controller_target_rotation}")
 
