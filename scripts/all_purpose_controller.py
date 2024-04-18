@@ -5,26 +5,26 @@ from sensor_msgs.msg import Joy
 from rclpy.node import Node
 
 from kinova_msgs.action import ArmPose
-from kinova_msgs.msg import PoseVelocity
-from geometry_msgs.msg import PoseStamped, WrenchStamped, Pose
-from tf2_ros.buffer import Buffer
-from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 from kinova_msgs.msg import PoseVelocity, PoseVelocityWithFingerVelocity
-from geometry_msgs.msg import Point
-
-from tf2_ros.transform_listener import TransformListener
-
-from tf2_ros.transform_broadcaster import TransformBroadcaster
 from geometry_msgs.msg import TransformStamped, Transform
+from geometry_msgs.msg import PoseStamped, WrenchStamped, Pose, Point
 
-from scipy.spatial.transform import Rotation # IMPORTANT, USES x,y,z,w
-import numpy as np
+from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
+from tf2_ros.buffer import Buffer
+from tf2_ros.transform_listener import TransformListener
+from tf2_ros.transform_broadcaster import TransformBroadcaster
 
 from enum import Enum
+
+from scipy.spatial.transform import Rotation # IMPORTANT, USES x,y,z,w
+
+import numpy as np
+
 
 # Movement enabled? Useful for testing
 CARTESIAN_MOVEMENT_ENABLED = True
 CAMERA_ROTATION_COMPENSATION = False
+PID_ENABLED = False
 
 # Constants for max velocities
 MAX_LINEAR_VELOCITY = 0.070     # m/s
@@ -189,21 +189,22 @@ class JacoController(Node):
                 rotation_vel_target = np.zeros(3)
 
             ### PID ###
-            # Decouple the rotation and linear velocity
+            if PID_ENABLED and self.current_vel is not None:
+                #self.get_logger().info(f"{target_vel}")
+                #self.get_logger().info(f"{self.current_vel[0:3]}")
         
-            if self.current_vel is not None:
-                self.get_logger().info(f"{target_vel}")
-                self.get_logger().info(f"{self.current_vel[0:3]}")
-
-                #Disable PID to check signals
+                # PID decoupled for linear and angular
+                # Values are different
                 target_vel = self.PID_linear_vel.control_update(target_vel, self.current_vel[0:3]) #, rotation_vel_target, current_ee_rotation)
-        
+                # rotation_vel_target = self.PID_angular_vel.control_update(rotation_vel_target, self.current_vel[3:6]) #, rotation_vel_target, current_ee_rotation)
+
+                # Publish for debugging controller
                 #self.test_measured_vel_pub.publish(Point(x=self.current_vel[0], y=self.current_vel[1], z=self.current_vel[2]))
-                self.test_target_vel_pub.publish(Point(x=target_vel[0], y=target_vel[1], z=target_vel[2]))
+                #self.test_target_vel_pub.publish(Point(x=target_vel[0], y=target_vel[1], z=target_vel[2]))
 
-            #command_angular_vel = self.PID_angular_vel.control_update(rotation_vel_target, self.current_vel) #, rotation_vel_target, current_ee_rotation)
+            # --- Finger Control ---
+            finger_target_velocity = self.find_finger_velocity(self.joy_msg)
 
-                
             ### Pack pose goal into message ###
             target_vel_msg = PoseVelocityWithFingerVelocity() 
 
@@ -214,9 +215,6 @@ class JacoController(Node):
             target_vel_msg.twist_angular_x = rotation_vel_target[0]
             target_vel_msg.twist_angular_y = rotation_vel_target[1]
             target_vel_msg.twist_angular_z = rotation_vel_target[2]
-
-            # --- Finger Control ---
-            finger_target_velocity = self.find_finger_velocity(self.joy_msg)
             
             target_vel_msg.finger1 = finger_target_velocity[0]
             target_vel_msg.finger2 = finger_target_velocity[1]
@@ -225,9 +223,8 @@ class JacoController(Node):
             # Pack pose goal into action message
             self.vel_pub.publish(target_vel_msg)
 
+            # Debugging
             #self.get_logger().info("Sending")
-            #self.log_results(separator=True)
-
             """self.log_results(current_rot = True, 
                              target_rot=True ,  
                              separator=True)"""
