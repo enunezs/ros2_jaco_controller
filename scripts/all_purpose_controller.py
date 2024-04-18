@@ -27,10 +27,10 @@ CARTESIAN_MOVEMENT_ENABLED = True
 CAMERA_ROTATION_COMPENSATION = False
 
 # Constants for max velocities
-MAX_LINEAR_VELOCITY = 0.050    # m/s
-MAX_ANGULAR_VELOCITY = 2.0      
+MAX_LINEAR_VELOCITY = 0.070     # m/s
+MAX_ANGULAR_VELOCITY = 2.0      # TODO CONFIRM
 MAX_FINGER_VELOCITY = 2000.0    # mm/s
-ROTATION_ASSISTANCE = 2.0
+ROTATION_ASSISTANCE = 2.0   
 ROTATION_INTEGRATION = 0.01
 
 # Constants for cartesian movement behaviour
@@ -323,6 +323,7 @@ class JacoController(Node):
         #rot_base = Rotation.from_quat([0.0, 0.0, 0, 1]) # Pointing up # scipy convention (x, y, z, w)  
         #rot_base = Rotation.from_quat([0.707, 0.0, 0, 0.707]) # Pointing forward # scipy convention (x, y, z, w)  
         rot_base = Rotation.from_euler('xyz', [ -180,0,90], degrees=True)
+        rot_base = Rotation.from_euler('xyz', [ -180,0,180], degrees=True)
 
 
         ### ROTATION FROM CONTROLLER ###
