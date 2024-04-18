@@ -42,7 +42,10 @@ import numpy as np
 
 class PIDController:
     def __init__(self, kp=1.0, ki=0.0, kd=0.0, refresh_rate=1.0,length=3):
-        self.kp = kpself.
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.refresh_rate = refresh_rate
         self.length = length
         self.prev_error = np.zeros(self.length)
         self.integral_error = np.zeros(self.length)
