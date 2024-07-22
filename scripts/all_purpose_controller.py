@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 
+'''
+colcon build --packages-select ros2_jaco_controller 
+'''
+
 import rclpy
 from sensor_msgs.msg import Joy
 from rclpy.node import Node
@@ -28,7 +32,10 @@ class ControlMode(Enum):
     #HEAD_FOLLOW_SPHERICAL = 2
     #HEAD_FOLLOW_CYLINDRICAL = 3
 
-active_control_mode = ControlMode.RELATIVE_EE
+active_control_mode = ControlMode.GLOBAL
+
+START_ROTATION = Rotation.from_euler('xyz', [ -180-20,00,180], degrees=True)
+ROTATION_CONTROL_ENABLED = False
 
 # ! LOCK at 100Hz. As per documentation
 REFRESH_RATE = 100.0
@@ -107,8 +114,9 @@ class JacoController(Node):
         self.vel_pub = self.create_publisher(PoseVelocityWithFingerVelocity, '/j2n6s300_driver/in/cartesian_velocity_with_finger_velocity', 1)
         self.dynamic_broadcaster = TransformBroadcaster(self)
 
-        self.test_target_vel_pub = self.create_publisher(Point, '/jaco/test_target_vel_pub', 1)
-        self.test_measured_vel_pub = self.create_publisher(Point, '/jaco/test_measured_vel_pub', 1)
+        self.test_target_vel_pub = self.create_publisher(Point, '/test/requested_vel_pub', 1)
+        self.test_pid_vel_pub = self.create_publisher(Point, '/test/pid_target_vel_pub', 1)
+        self.test_measured_vel_pub = self.create_publisher(Point, '/test/measured_vel_pub', 1)
 
         self.update = self.create_timer(1.0/REFRESH_RATE, self.update_controller)
 
@@ -119,7 +127,7 @@ class JacoController(Node):
         self.relative_cartesian_movement_enabled = self.declare_and_get_parameter("relative_cartesian_movement_enabled", False)
 
         # Max velocities
-        self.max_linear_velocity = self.declare_and_get_parameter("max_linear_velocity", 0.070)
+        self.max_linear_velocity = self.declare_and_get_parameter("max_linear_velocity", (0.070,0.070,0.070))
         self.max_angular_velocity = self.declare_and_get_parameter("max_angular_velocity", 2.0)
         self.max_finger_velocity = self.declare_and_get_parameter("max_finger_velocity", 2000.0)
 
@@ -146,6 +154,7 @@ class JacoController(Node):
         self.current_vel = None # Unused right now
         #self.prev_error = None
         #self.start_pose = None
+        self.vel_filter = RollingAverageFilter(window_size=5)  # Adjust window_size as needed
 
         # Joystick buffer
         self.joy_msg = None
@@ -162,7 +171,6 @@ class JacoController(Node):
         self.PID_linear_vel = PIDController(kp=self.kp_linear, ki=self.ki_linear, kd=self.kd_linear, refresh_rate=REFRESH_RATE)
         self.PID_angular_vel = PIDController(kp=self.kp_angular, ki=self.ki_angular, kd=self.kd_angular, refresh_rate=REFRESH_RATE)
 
-        self.vel_filter = RollingAverageFilter(window_size=5)  # Adjust window_size as needed
 
 
     def declare_and_get_parameter(self, name, default):
@@ -193,6 +201,17 @@ class JacoController(Node):
                 local_vel = self.find_relative_velocity(global_vel, target_frame = 'j2n6s300_end_effector')
                 target_vel = local_vel
 
+            ### PID ###
+            # PID decoupled for linear and angular
+            self.test_target_vel_pub.publish(Point(x=target_vel[0], y=target_vel[1], z=target_vel[2]))
+            self.test_measured_vel_pub.publish(Point(x=self.current_vel[0], y=self.current_vel[1], z=self.current_vel[2]))
+
+            if self.pid_enabled and self.current_vel is not None:
+                target_vel = target_vel + self.PID_linear_vel.control_update(target_vel, self.current_vel[0:3]) #, rotation_vel_target, current_ee_rotation)
+                # Publish for debugging controller
+                self.test_pid_vel_pub.publish(Point(x=target_vel[0], y=target_vel[1], z=target_vel[2]))
+                #self.test_measured_vel_pub.publish(Point(x=self.current_vel[0], y=self.current_vel[1], z=self.current_vel[2]))
+
             ### Rotation velocity update ###
             self.rotation_target_pose : Rotation = self.find_rotation_pose(self.joy_msg) 
             current_ee_rotation = self.get_ee_rotation()
@@ -202,19 +221,8 @@ class JacoController(Node):
             else:
                 rotation_vel_target = np.zeros(3)
 
-            ### PID ###
-            if self.pid_enabled and self.current_vel is not None:
-                #self.get_logger().info(f"{target_vel}")
-                #self.get_logger().info(f"{self.current_vel[0:3]}")
-        
-                # PID decoupled for linear and angular
-                # Values are different
-                target_vel = self.PID_linear_vel.control_update(target_vel, self.current_vel[0:3]) #, rotation_vel_target, current_ee_rotation)
-                # rotation_vel_target = self.PID_angular_vel.control_update(rotation_vel_target, self.current_vel[3:6]) #, rotation_vel_target, current_ee_rotation)
 
-                # Publish for debugging controller
-                #self.test_measured_vel_pub.publish(Point(x=self.current_vel[0], y=self.current_vel[1], z=self.current_vel[2]))
-                #self.test_target_vel_pub.publish(Point(x=target_vel[0], y=target_vel[1], z=target_vel[2]))
+
 
             # --- Finger Control ---
             finger_target_velocity = self.find_finger_velocity(self.joy_msg)
@@ -333,16 +341,17 @@ class JacoController(Node):
         #rot_base = Rotation.from_quat([0.5, 0.5, -0.5, 0.5]) # Pointing forward, buttons left # scipy convention (x, y, z, w)  
         #rot_base = Rotation.from_quat([0.0, 0.0, 0, 1]) # Pointing up # scipy convention (x, y, z, w)  
         #rot_base = Rotation.from_quat([0.707, 0.0, 0, 0.707]) # Pointing forward # scipy convention (x, y, z, w)  
-        rot_base = Rotation.from_euler('xyz', [ -180,0,90], degrees=True)
-        rot_base = Rotation.from_euler('xyz', [ -180,0,180], degrees=True)
-
+        #rot_base = Rotation.from_euler('xyz', [ -180,0,90], degrees=True)
+        #rot_base = Rotation.from_euler('xyz', [ -180,0,180], degrees=True)
+        rot_base = START_ROTATION 
 
         ### ROTATION FROM CONTROLLER ###
         orientation_change = np.zeros(3)
-        orientation_change[0] = (-joy_msg.axes[4] ) 
-        orientation_change[1] = (-joy_msg.axes[3] )  
-        orientation_change[2] = (joy_msg.buttons[5] - joy_msg.buttons[4]) 
-        orientation_change = orientation_change * 20.0
+        if ROTATION_CONTROL_ENABLED:
+            orientation_change[0] = (-joy_msg.axes[4] ) 
+            orientation_change[1] = (-joy_msg.axes[3] )  
+            orientation_change[2] = (joy_msg.buttons[5] - joy_msg.buttons[4]) 
+            orientation_change = orientation_change * 20.0
 
         # Clamp rotation
         MAX_ROTATION_CHANGE = 60.0
@@ -454,9 +463,14 @@ class JacoController(Node):
         #euler_velocity_target = self.rotation_euler_target * self.max_angular_velocity
 
         euler_velocity_target = np.zeros(3)
-        euler_velocity_target[0] = self.rotation_euler_target[0] * self.max_angular_velocity
-        euler_velocity_target[1] = self.rotation_euler_target[1] * self.max_angular_velocity
-        euler_velocity_target[2] = self.rotation_euler_target[2] * self.max_angular_velocity 
+
+        if self.pid_enabled:
+            euler_velocity_target = self.PID_angular_vel.control_update(self.rotation_euler_target, np.zeros(3))
+        else:
+
+            euler_velocity_target[0] = self.rotation_euler_target[0] * self.max_angular_velocity
+            euler_velocity_target[1] = self.rotation_euler_target[1] * self.max_angular_velocity
+            euler_velocity_target[2] = self.rotation_euler_target[2] * self.max_angular_velocity 
 
         return euler_velocity_target
 
@@ -524,7 +538,7 @@ class JacoController(Node):
         prev_pose = self.current_pose
         self.current_pose = pose_msg
         
-        #self.update_current_vel(self.current_pose, prev_pose)
+        self.update_current_vel(self.current_pose, prev_pose)
 
 
 
@@ -533,12 +547,11 @@ class JacoController(Node):
         if prev_pose is None:
             self.current_vel = np.zeros(6)
             self.time_prev = self.get_clock().now()
-            self.get_clock().now()
             return
         
         
         current_time = self.get_clock().now()
-        duration = (current_time - self.time_prev).nanoseconds() * 1e-9
+        duration = (current_time - self.time_prev).nanoseconds * 1e-9
         raw_vel = np.array([current_pose.pose.position.x - prev_pose.pose.position.x,
                                      current_pose.pose.position.y - prev_pose.pose.position.y,
                                      current_pose.pose.position.z - prev_pose.pose.position.z,
@@ -550,7 +563,6 @@ class JacoController(Node):
 
         #1.0/(current_time-self.time_prev)
         
-        self.test_measured_vel_pub.publish(Point(x=self.current_vel[0], y=self.current_vel[1], z=self.current_vel[2]))
         self.time_prev = current_time
 
 
