@@ -246,7 +246,8 @@ class JacoController(Node):
         #rot_base = Rotation.from_quat([0.5, 0.5, -0.5, 0.5]) # Pointing forward, buttons left # scipy convention (x, y, z, w)  
         #rot_base = Rotation.from_quat([0.0, 0.0, 0, 1]) # Pointing up # scipy convention (x, y, z, w)  
         #rot_base = Rotation.from_quat([0.707, 0.0, 0, 0.707]) # Pointing forward # scipy convention (x, y, z, w)  
-        rot_base = Rotation.from_euler('xyz', [ -180,0,90], degrees=True)
+        rot_base = Rotation.from_euler('xyz', [ -180,0,-90], degrees=True)
+        rot_base = Rotation.from_euler('xyz', [ -180,-90,-90], degrees=True)
 
 
         ### ROTATION FROM CONTROLLER ###
