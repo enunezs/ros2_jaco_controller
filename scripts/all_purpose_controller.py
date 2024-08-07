@@ -540,9 +540,6 @@ class JacoController(Node):
         
         self.update_current_vel(self.current_pose, prev_pose)
 
-
-
-
     def update_current_vel(self, current_pose, prev_pose):
         if prev_pose is None:
             self.current_vel = np.zeros(6)
