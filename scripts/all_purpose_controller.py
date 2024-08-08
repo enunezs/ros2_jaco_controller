@@ -9,9 +9,12 @@ from sensor_msgs.msg import Joy
 from rclpy.node import Node
 
 from kinova_msgs.action import ArmPose
-from kinova_msgs.msg import PoseVelocity, PoseVelocityWithFingerVelocity
+from kinova_msgs.msg import PoseVelocity, PoseVelocityWithFingerVelocity, FingerPosition
 from geometry_msgs.msg import TransformStamped, Transform
 from geometry_msgs.msg import PoseStamped, WrenchStamped, Pose, Point
+
+from std_msgs.msg import Int32 as int_msg
+from std_msgs.msg import String as str_msg
 
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 from tf2_ros.buffer import Buffer
@@ -106,6 +109,7 @@ class JacoController(Node):
         self.joy_sub = self.create_subscription(Joy, '/joy', self.update_target_pose, 10)
         self.pose_sub = self.create_subscription(PoseStamped, '/j2n6s300_driver/out/tool_pose', self.update_current_pose, 10)
         self.force_sub = self.create_subscription(WrenchStamped, '/j2n6s300_driver/out/tool_wrench', self.update_current_force, 10)
+        self.pose_sub = self.create_subscription(FingerPosition, '/j2n6s300_driver/out/finger_position', self.update_current_finger_pose, 10) # TODO
 
         self.tf_target_buffer = Buffer()
         self.tf_target_listener = TransformListener(self.tf_target_buffer, self)
@@ -117,6 +121,11 @@ class JacoController(Node):
         self.test_target_vel_pub = self.create_publisher(Point, '/test/requested_vel_pub', 1)
         self.test_pid_vel_pub = self.create_publisher(Point, '/test/pid_target_vel_pub', 1)
         self.test_measured_vel_pub = self.create_publisher(Point, '/test/measured_vel_pub', 1)
+
+        #Haptic Test Publisher
+        #self.haptics_pub = self.create_publisher(int_msg, "/haptic_feedback_uros", 1)
+        self.haptics_action_pub = self.create_publisher(str_msg, "/haptic_feedback_robot_string", 1)
+
 
         self.update = self.create_timer(1.0/REFRESH_RATE, self.update_controller)
 
@@ -171,6 +180,13 @@ class JacoController(Node):
         self.PID_linear_vel = PIDController(kp=self.kp_linear, ki=self.ki_linear, kd=self.kd_linear, refresh_rate=REFRESH_RATE)
         self.PID_angular_vel = PIDController(kp=self.kp_angular, ki=self.ki_angular, kd=self.kd_angular, refresh_rate=REFRESH_RATE)
 
+        #Finger Positions
+        self.prev_fingers_pose = [0,0,0]
+        self.current_finger_pose = [0,0,0] # TODO: change to numpy?
+
+        #Workspace Haptics
+        self.end_of_workspace = False
+
 
 
     def declare_and_get_parameter(self, name, default):
@@ -221,11 +237,11 @@ class JacoController(Node):
             else:
                 rotation_vel_target = np.zeros(3)
 
-
-
-
             # --- Finger Control ---
             finger_target_velocity = self.find_finger_velocity(self.joy_msg)
+
+            # Check movement for hapcitcs
+            self.finger_collision(finger_target_velocity, threshhold = 1.0) # TODO: Change name
 
             ### Pack pose goal into message ###
             target_vel_msg = PoseVelocityWithFingerVelocity() 
@@ -540,12 +556,17 @@ class JacoController(Node):
         
         self.update_current_vel(self.current_pose, prev_pose)
 
+    def update_current_finger_pose(self, finger_msg):
+        self.prev_fingers_pose = self.current_finger_pose
+        self.current_finger_pose = np.array([ finger_msg.finger1, finger_msg.finger2, finger_msg.finger3])
+
+        #self.update_finger_vel(self.current_finger_pose, self.prev_fingers_pose)
+
     def update_current_vel(self, current_pose, prev_pose):
         if prev_pose is None:
             self.current_vel = np.zeros(6)
             self.time_prev = self.get_clock().now()
             return
-        
         
         current_time = self.get_clock().now()
         duration = (current_time - self.time_prev).nanoseconds * 1e-9
@@ -562,6 +583,63 @@ class JacoController(Node):
         
         self.time_prev = current_time
 
+        #Getting X vel vs target vel
+        curr_x_vel = current_pose.pose.position.x - prev_pose.pose.position.x
+        target_x_vel = 0 ## THIS NEEDS A VALUE!!!! HOW DO WE GET THIS!!!! WHAT DO WE GET THIS!!! W
+        # curr_x_vel = self.current_vel[0] # TODO 
+
+
+    #if target vel is above a threshhold, engage haptic feedback
+    def finger_collision(self, finger_target_velocity: np.ndarray ,  threshhold=1):
+        hf_msg = str_msg()
+        hf_msg.data = "none"
+
+        threshhold_min_velocity = 0.1 # m/s
+        threshhold_min_distance = 200 # mm
+
+        self.get_logger().info(f"Running haptic function")
+        # If the fingers are not being told to move, do not engage haptics
+        fingers_should_move = np.linalg.norm(finger_target_velocity) > 0.2
+        self.get_logger().info(f"I think fingers should move: {fingers_should_move}")
+
+        if(not fingers_should_move):
+            pass
+
+        # If the finger current position is similar to before, it is not moving, therefore do not engage haptics
+        # Wyatt approach
+        #are_fingers_moving = np.abs(np.mean(self.prev_fingers_pose) - np.mean(self.prev_fingers_pose)) > threshhold
+        # Emanuel
+        are_fingers_moving = (np.linalg.norm(self.prev_fingers_pose - self.current_finger_pose)) > threshhold
+        self.get_logger().info(f"I think fingers are moving: {are_fingers_moving}")
+
+        if fingers_should_move and not are_fingers_moving:
+            hf_msg.data = "grasping"
+            pass
+
+        self.haptics_action_pub.publish(hf_msg)
+
+
+    #Applies haptics to correct actuator, based on direction of end effector relative to workspace
+    #Turns off if was prev on, and any message is sent
+    """def end_of_workspace_haptics(self, direction):
+        hf_msg = int_msg()
+        if(direction == "right"):
+            hf_msg.data = 3001
+            self.end_of_workspace = True
+
+        elif(direction == "left"):
+            hf_msg.data = 3100
+            self.end_of_workspace = True
+
+        elif(direction == "other"):
+            hf_msg.data = 3010
+            self.end_of_workspace = True
+
+        elif(self.end_of_workspace == True):
+            self.end_of_workspace = False
+            hf_msg.data = 3000
+
+        #self.haptics_pub.publish(hf_msg)"""
 
     def update_current_force(self, force_msg):
         self.current_force = force_msg 
