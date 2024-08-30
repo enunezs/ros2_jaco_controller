@@ -1,6 +1,7 @@
 import rclpy
 from sensor_msgs.msg import Joy
 from kinova_msgs.msg import JointAngles
+from KinovaCommand import KinovaCommand
 from rclpy.node import Node
 
 from kinova_msgs.action import ArmPose

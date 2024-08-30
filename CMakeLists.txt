@@ -38,6 +38,7 @@ ament_python_install_package(scripts)
 
 install(PROGRAMS
   scripts/all_purpose_controller.py
+  scripts/go_to_pose.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

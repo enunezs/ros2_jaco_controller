@@ -37,7 +37,8 @@ class ControlMode(Enum):
 
 active_control_mode = ControlMode.GLOBAL
 
-START_ROTATION = Rotation.from_euler('xyz', [ -180-20,00,180-10], degrees=True)
+TARGET_POSITION = [0.4, 0.0, 0.3]
+START_ROTATION = Rotation.from_euler('xyz', [ -180-20,0,180-10], degrees=True)
 ROTATION_CONTROL_ENABLED = False
 
 # ! LOCK at 100Hz. As per documentation
@@ -51,7 +52,7 @@ REFRESH_RATE = 100.0
 import numpy as np
 
 class PIDController:
-    def __init__(self, kp=1.0, ki=0.0, kd=0.0, refresh_rate=1.0,length=3, anti_windup=True):
+    def __init__(self, kp=1.0, ki=0.0, kd=0.0, refresh_rate=1.0,length=3):
         self.kp = kp
         self.ki = ki
         self.kd = kd
@@ -60,7 +61,6 @@ class PIDController:
         self.prev_error = np.zeros(self.length)
         self.integral_error = np.zeros(self.length)
         self.derivative_error = np.zeros(self.length)
-        self.anti_windup = anti_windup 
 
     def update_parameters(self, kp=None, ki=None, kd=None, refresh_rate=None):
         if kp is not None:
@@ -78,11 +78,7 @@ class PIDController:
 
         current_error = target_vel - current_vel
 
-        # Add anti-windup
         self.integral_error += current_error * (1.0 / self.refresh_rate)
-        if self.anti_windup:
-            self.integral_error = np.clip(self.integral_error, -1.0, 1.0)
-               
         self.derivative_error = (current_error - self.prev_error) * self.refresh_rate
 
         self.prev_error = current_error
@@ -150,12 +146,12 @@ class JacoController(Node):
         self.quantisation_degrees = self.declare_and_get_parameter("quantisation_degrees", 30.0)
 
         # PID
-        self.pid_enabled = self.declare_and_get_parameter("pid_enabled", False)
-        self.kp_linear = self.declare_and_get_parameter("kp_linear", 1.0)
-        self.ki_linear = self.declare_and_get_parameter("ki_linear", 0.0)
+        self.pid_enabled = self.declare_and_get_parameter("pid_enabled", True)
+        self.kp_linear = self.declare_and_get_parameter("kp_linear", 0.8)
+        self.ki_linear = self.declare_and_get_parameter("ki_linear", .1)
         self.kd_linear = self.declare_and_get_parameter("kd_linear", 0.0)
-        self.kp_angular = self.declare_and_get_parameter("kp_angular", 1.0)
-        self.ki_angular = self.declare_and_get_parameter("ki_angular", 0.0)
+        self.kp_angular = self.declare_and_get_parameter("kp_angular", 0.80)
+        self.ki_angular = self.declare_and_get_parameter("ki_angular", 0.20)
         self.kd_angular = self.declare_and_get_parameter("kd_angular", 0.0)
 
         # Camera rotation compensation
@@ -206,15 +202,17 @@ class JacoController(Node):
 
         # Only update if we have all needed data: controller and current pose
         # TODO check time stamps are recent 
-        if self.joy_msg is None or self.current_pose is None :
-            return
+        #if self.joy_msg is None or self.current_pose is None :
+        #    return
         try:
 
             ### Preprocess discrete actions
-            self.discrete_actions(self.joy_msg)
+            # self.discrete_actions(self.joy_msg)
 
+
+            
             ### Cartesian velocity update ###
-            global_vel: np.ndarray = self.find_linear_velocity(self.joy_msg)
+            global_vel: np.ndarray = self.find_linear_velocity()
             target_vel: np.ndarray = global_vel
             
             global active_control_mode
@@ -234,7 +232,7 @@ class JacoController(Node):
                 #self.test_measured_vel_pub.publish(Point(x=self.current_vel[0], y=self.current_vel[1], z=self.current_vel[2]))
 
             ### Rotation velocity update ###
-            self.rotation_target_pose : Rotation = self.find_rotation_pose(self.joy_msg) 
+            self.rotation_target_pose : Rotation = self.find_rotation_pose() 
             current_ee_rotation = self.get_ee_rotation()
 
             if current_ee_rotation is not None:
@@ -243,7 +241,7 @@ class JacoController(Node):
                 rotation_vel_target = np.zeros(3)
 
             # --- Finger Control ---
-            finger_target_velocity = self.find_finger_velocity(self.joy_msg)
+            finger_target_velocity = np.zeros(3)  # self.find_finger_velocity(self.joy_msg)
 
             # Check movement for hapcitcs
             self.finger_collision(finger_target_velocity, threshhold = 1.0) # TODO: Change name
@@ -314,7 +312,7 @@ class JacoController(Node):
         self.prev_joy_msg = joy_msg
 
 
-    def find_linear_velocity(self, joy_msg) -> np.ndarray:
+    def find_linear_velocity(self) -> np.ndarray:
 
         # If cartesian movement is disabled, return 0,0,0
         if not self.cartesian_movement_enabled:
@@ -323,18 +321,29 @@ class JacoController(Node):
         # Target vel update
         cartesian_vel_target = np.zeros(3)
 
+        # Vel is target pos - current pos
+        cartesian_vel_target = np.array([TARGET_POSITION[0] - self.current_pose.pose.position.x,
+                                         TARGET_POSITION[1] - self.current_pose.pose.position.y,
+                                         TARGET_POSITION[2] - self.current_pose.pose.position.z])
+
+        # Print
+        self.get_logger().info(f"Cartesian vel target: {cartesian_vel_target}")
+
+
+        """
         # Read from controller 
         cartesian_vel_target[0] = (joy_msg.axes[0] ) # Joystick left horizontal
         cartesian_vel_target[1] = ((joy_msg.axes[5] - joy_msg.axes[2]) ) # Trigger difference
         cartesian_vel_target[2] = (joy_msg.axes[1] ) # Joystick left vertical
-        
+        """
         
         # Normalise and multiply by max velocity
         if self.normalise_cartesian_speed :
             cartesian_vel_target = cartesian_vel_target / np.linalg.norm(cartesian_vel_target)
             
-        # Multiply by max velocity
-        cartesian_vel_target = cartesian_vel_target * self.max_linear_velocity
+        # Clamp to max velocity
+        #cartesian_vel_target = np.clip(cartesian_vel_target, -self.max_linear_velocity, self.max_linear_velocity)
+        
 
         return cartesian_vel_target
     
@@ -354,7 +363,7 @@ class JacoController(Node):
         return local_vel
 
 
-    def find_rotation_pose(self, joy_msg:Joy) -> Rotation:
+    def find_rotation_pose(self) -> Rotation:
         # Define the target
         world_frame = 'j2n6s300_link_base'
 
@@ -369,9 +378,9 @@ class JacoController(Node):
         ### ROTATION FROM CONTROLLER ###
         orientation_change = np.zeros(3)
         if ROTATION_CONTROL_ENABLED:
-            orientation_change[0] = (-joy_msg.axes[4] ) 
-            orientation_change[1] = (-joy_msg.axes[3] )  
-            orientation_change[2] = (joy_msg.buttons[5] - joy_msg.buttons[4]) 
+            orientation_change[0] = 0#(-joy_msg.axes[4] ) 
+            orientation_change[1] = 0#(-joy_msg.axes[3] )  
+            orientation_change[2] = 0#(joy_msg.buttons[5] - joy_msg.buttons[4]) 
             orientation_change = orientation_change * 20.0
 
         # Clamp rotation
@@ -381,6 +390,7 @@ class JacoController(Node):
         # Apply to cummulative rotation
         self.cumulative_rotation += orientation_change * (1.0 / REFRESH_RATE) # Not accurate!
         controller_target_rotation = self.cumulative_rotation
+
         # Discretise
         if self.discretise_rotation:
             controller_target_rotation = np.round(controller_target_rotation / self.quantisation_degrees) * self.quantisation_degrees
@@ -602,10 +612,8 @@ class JacoController(Node):
         threshhold_min_velocity = 0.1 # m/s
         threshhold_min_distance = 200 # mm
 
-        #self.get_logger().info(f"Running haptic function")
         # If the fingers are not being told to move, do not engage haptics
         fingers_should_move = np.linalg.norm(finger_target_velocity) > 0.2
-        #self.get_logger().info(f"I think fingers should move: {fingers_should_move}")
 
         if(not fingers_should_move):
             pass
@@ -615,7 +623,6 @@ class JacoController(Node):
         #are_fingers_moving = np.abs(np.mean(self.prev_fingers_pose) - np.mean(self.prev_fingers_pose)) > threshhold
         # Emanuel
         are_fingers_moving = (np.linalg.norm(self.prev_fingers_pose - self.current_finger_pose)) > threshhold
-        #self.get_logger().info(f"I think fingers are moving: {are_fingers_moving}")
 
         if fingers_should_move and not are_fingers_moving:
             hf_msg.data = "grasping"
