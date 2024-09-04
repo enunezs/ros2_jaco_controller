@@ -4,9 +4,9 @@
     normalise_cartesian_speed: False
     relative_cartesian_movement_enabled: False
     max_linear_velocity:
-      - 0.05
-      - 0.04
-      - 0.03
+      - 0.2
+      - 0.12
+      - 0.16
     max_angular_velocity: 5.0
     max_finger_velocity: 2000.0
     discretise_rotation: True

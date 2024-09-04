@@ -37,16 +37,18 @@ class ControlMode(Enum):
 
 active_control_mode = ControlMode.GLOBAL
 
-START_ROTATION = Rotation.from_euler('xyz', [ -180-20,00,180-10], degrees=True)
+START_ROTATION = Rotation.from_euler('xyz', [ -180-20,00-5,180-10], degrees=True)
 ROTATION_CONTROL_ENABLED = False
 
-# ! LOCK at 100Hz. As per documentation
+MAX_SPEED = (0.50,0.3,0.8) # OG X10
+#MAX_SPEED = (0.10,0.06,0.08) # OG X2
+MAX_SPEED = (0.1,0.06,0.08) # OLD
+
+CARTESIAN_MOVEMENT_ENABLED = True
 REFRESH_RATE = 100.0
 
 # ros2 service call /j2n6s300_driver/in/set_torque_control_mode kinova_msgs/srv/SetTorqueControlMode state:\ 1\
 # ros2 service call /j2n6s300_driver/in/start kinova_msgs/srv/Start {}\ 
-
-
 
 import numpy as np
 
@@ -136,12 +138,14 @@ class JacoController(Node):
 
         ### Parameters ### 
         # Cartesian movement
-        self.cartesian_movement_enabled = self.declare_and_get_parameter("cartesian_movement_enabled", True)
+        global CARTESIAN_MOVEMENT_ENABLED 
+        self.cartesian_movement_enabled = self.declare_and_get_parameter("cartesian_movement_enabled", CARTESIAN_MOVEMENT_ENABLED)
         self.normalise_cartesian_speed = self.declare_and_get_parameter("normalise_cartesian_speed", False)
         self.relative_cartesian_movement_enabled = self.declare_and_get_parameter("relative_cartesian_movement_enabled", False)
 
         # Max velocities
-        self.max_linear_velocity = self.declare_and_get_parameter("max_linear_velocity", (0.070,0.070,0.070))
+        global MAX_SPEED
+        self.max_linear_velocity = self.declare_and_get_parameter("max_linear_velocity", MAX_SPEED)
         self.max_angular_velocity = self.declare_and_get_parameter("max_angular_velocity", 2.0)
         self.max_finger_velocity = self.declare_and_get_parameter("max_finger_velocity", 2000.0)
 
@@ -150,13 +154,13 @@ class JacoController(Node):
         self.quantisation_degrees = self.declare_and_get_parameter("quantisation_degrees", 30.0)
 
         # PID
-        self.pid_enabled = self.declare_and_get_parameter("pid_enabled", False)
-        self.kp_linear = self.declare_and_get_parameter("kp_linear", 1.0)
-        self.ki_linear = self.declare_and_get_parameter("ki_linear", 0.0)
+        self.pid_enabled = self.declare_and_get_parameter("pid_enabled", True)
+        self.kp_linear = self.declare_and_get_parameter("kp_linear", 0.7)
+        self.ki_linear = self.declare_and_get_parameter("ki_linear", 0.1)
         self.kd_linear = self.declare_and_get_parameter("kd_linear", 0.0)
-        self.kp_angular = self.declare_and_get_parameter("kp_angular", 1.0)
-        self.ki_angular = self.declare_and_get_parameter("ki_angular", 0.0)
-        self.kd_angular = self.declare_and_get_parameter("kd_angular", 0.0)
+        self.kp_angular = self.declare_and_get_parameter("kp_angular", 2.0)
+        self.ki_angular = self.declare_and_get_parameter("ki_angular", 2.0)
+        self.kd_angular = self.declare_and_get_parameter("kd_angular", 5.0)
 
         # Camera rotation compensation
         self.camera_rotation_compensation = self.declare_and_get_parameter("camera_rotation_compensation", False)
@@ -177,6 +181,8 @@ class JacoController(Node):
         # Rotation changes buffer
         self.cumulative_rotation = np.zeros(3) # Euler angles
         
+        self.prev_cartesian_vel_target = np.zeros(3)
+
         # Rotation start
         self.roll = 0 
         self.pitch = 0
@@ -314,7 +320,7 @@ class JacoController(Node):
         self.prev_joy_msg = joy_msg
 
 
-    def find_linear_velocity(self, joy_msg) -> np.ndarray:
+    """def find_linear_velocity(self, joy_msg) -> np.ndarray:
 
         # If cartesian movement is disabled, return 0,0,0
         if not self.cartesian_movement_enabled:
@@ -328,6 +334,9 @@ class JacoController(Node):
         cartesian_vel_target[1] = ((joy_msg.axes[5] - joy_msg.axes[2]) ) # Trigger difference
         cartesian_vel_target[2] = (joy_msg.axes[1] ) # Joystick left vertical
         
+        # Controller filtering
+
+        cartesian_vel_target
         
         # Normalise and multiply by max velocity
         if self.normalise_cartesian_speed :
@@ -336,7 +345,127 @@ class JacoController(Node):
         # Multiply by max velocity
         cartesian_vel_target = cartesian_vel_target * self.max_linear_velocity
 
+        return cartesian_vel_target"""
+    
+    
+    # TODO
+    def find_linear_velocity(self, joy_msg) -> np.ndarray:
+
+        # If cartesian movement is disabled, return 0,0,0
+        if not self.cartesian_movement_enabled:
+            return np.zeros(3)
+
+        # Target vel update
+        input_vector = np.zeros(3)
+        cartesian_vel_target = self.prev_cartesian_vel_target
+
+        forward_acceleration = np.array([0.015, 0.009, 0.012]) # 1 second to max speed
+        #forward_acceleration = np.array([0.005, 0.003, 0.04])*3 # 1 second to max speed
+
+        break_acceleration = 1.0 # 200 ms seconds to break
+        min_speed = 0.0125 # 0.05
+
+        # Read from controller 
+        input_vector[0] = (joy_msg.axes[0] ) # Joystick left horizontal
+        input_vector[1] = ((joy_msg.axes[5] - joy_msg.axes[2]) ) # Trigger difference
+        input_vector[2] = (joy_msg.axes[1] ) # Joystick left vertical
+        
+        # Controller filtering
+        # If controller on deadzone OR user changed direction
+
+        for idx, input_dir in enumerate(input_vector):
+
+            is_hard_break = ((input_dir * cartesian_vel_target[idx]) < -0.2)
+            is_controller_on_deadzone = np.linalg.norm(input_dir) < 0.2
+
+            movement_dir = 1 if cartesian_vel_target[idx] > 0 else -1
+
+            # Break
+            if (is_controller_on_deadzone or is_hard_break) :
+                cartesian_vel_target[idx] -= movement_dir * break_acceleration / (REFRESH_RATE )
+
+                if abs(cartesian_vel_target[idx]) < min_speed*1.5 : 
+                    cartesian_vel_target[idx] = 0
+
+            # Acceleration
+            else:
+                # Apply increment
+                # If here, robot is moving with user
+                cartesian_vel_target[idx] += input_dir * forward_acceleration[idx] / (REFRESH_RATE )
+
+                if abs(cartesian_vel_target[idx]) < min_speed : 
+                    self.get_logger().info(f"fast start")
+                    cartesian_vel_target[idx] = min_speed * np.sign(input_dir)
+                #self.get_logger().info(f"(+) Speed increasing")
+        
+
+            cartesian_vel_target[idx] = np.clip(cartesian_vel_target[idx], -self.max_linear_velocity[idx], self.max_linear_velocity[idx])
+
+        #self.get_logger().info(f"x: {cartesian_vel_target[0]:.2f}, y: {cartesian_vel_target[1]:.2f}, z: {cartesian_vel_target[2]:.2f}")
+        
+        # Normalise and multiply by max velocity
+        if self.normalise_cartesian_speed :
+            cartesian_vel_target = cartesian_vel_target / np.linalg.norm(cartesian_vel_target)
+            
+        # Multiply by max velocity
+        self.prev_cartesian_vel_target =  cartesian_vel_target 
+
+
         return cartesian_vel_target
+    """
+    def find_linear_velocity(self, joy_msg) -> np.ndarray:
+
+        # If cartesian movement is disabled, return 0,0,0
+        if not self.cartesian_movement_enabled:
+            return np.zeros(3)
+
+        # Target vel update
+        input_vector = np.zeros(3)
+        cartesian_vel_target = self.prev_cartesian_vel_target
+
+        top_speed_time = 1.5 # 1 second to max speed
+        break_time = 0.150 # 200 ms seconds to break
+
+        min_speed = 0.05
+
+
+        # Read from controller 
+        input_vector[0] = (joy_msg.axes[0] ) # Joystick left horizontal
+        input_vector[1] = ((joy_msg.axes[5] - joy_msg.axes[2]) ) # Trigger difference
+        input_vector[2] = (joy_msg.axes[1] ) # Joystick left vertical
+        
+        # Controller filtering
+        # If controller on deadzone OR user changed direction
+
+        for idx, input_dir in enumerate(input_vector):
+
+            is_hard_break = ((input_dir * cartesian_vel_target[idx]) < -0.2)
+            is_controller_on_deadzone = np.linalg.norm(input_dir) < 0.1
+
+            if is_controller_on_deadzone or is_hard_break: 
+                cartesian_vel_target[idx] += - cartesian_vel_target[idx] / (REFRESH_RATE * break_time)
+                #self.get_logger().info(f"(-) Speed decreasing")
+            else:
+                # Apply increment
+                # If here, robot is moving with user
+                cartesian_vel_target[idx] += input_dir / (REFRESH_RATE * top_speed_time)
+                if abs(cartesian_vel_target[idx]) < min_speed : 
+                    self.get_logger().info(f"fast start")
+                    cartesian_vel_target[idx] = min_speed * np.sign(input_dir)
+                #self.get_logger().info(f"(+) Speed increasing")
+        
+        cartesian_vel_target = np.clip(cartesian_vel_target,-1,1)
+        #self.get_logger().info(f"x: {cartesian_vel_target[0]:.2f}, y: {cartesian_vel_target[1]:.2f}, z: {cartesian_vel_target[2]:.2f}")
+        
+        # Normalise and multiply by max velocity
+        if self.normalise_cartesian_speed :
+            cartesian_vel_target = cartesian_vel_target / np.linalg.norm(cartesian_vel_target)
+            
+        # Multiply by max velocity
+        self.prev_cartesian_vel_target =  cartesian_vel_target 
+
+
+        return cartesian_vel_target * self.max_linear_velocity"""
     
     def find_relative_velocity(self, global_vel : np.ndarray , target_frame = 'j2n6s300_end_effector' , source_frame = 'j2n6s300_link_base') -> np.ndarray:
 
@@ -601,6 +730,7 @@ class JacoController(Node):
 
         threshhold_min_velocity = 0.1 # m/s
         threshhold_min_distance = 200 # mm
+
 
         #self.get_logger().info(f"Running haptic function")
         # If the fingers are not being told to move, do not engage haptics
