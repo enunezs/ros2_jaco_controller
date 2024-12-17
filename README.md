@@ -23,7 +23,7 @@ git clone https://github.com/enunezs/ros2_jaco_docker.git
 2. Navigate to the directory containing the Dockerfile and the `dockerscript.sh`:
 
    ```bash
-   cd ros2_franka_docker
+   cd ros2_jaco_controller
    ```
 
 3. If needed, make the `dockerscript.sh` executable:
@@ -44,23 +44,21 @@ To launch the container with the environment, run the following ready script:
 
 This will pull the latest image from the docker store and run the container with the recommended settings.
 
-## Main container
-
 To launch the controller for the Jaco arm, simply run the following command:
 
 ```bash
 ros2 launch ros2_jaco_controller jaco_and_controller.launch.py
 ```
 
-## Running a controller
+Or, you can separately run the environment and controller with the following command:
 
-To run a controller, simply run the following command:
+```bash
+ros2 launch ros2_jaco_controller jaco_with_moveit.launch.py
+```
 
 ```bash
 ros2 run ros2_jaco_controller all_purpose_controller.py
 ```
-
----
 
 ## Running nodes independently
 
