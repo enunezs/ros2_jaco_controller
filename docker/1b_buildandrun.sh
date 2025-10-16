@@ -11,6 +11,7 @@ docker run -it --env="DISPLAY" \
 	--net=host \
 	--volume $(pwd):/root/ws/origami \
 	--volume /dev/shm:/dev/shm \
+	--env "ROS_DOMAIN_ID=7" \
 	kinova-ros2:latest
 
 #	--env "ROS_DOMAIN_ID=7" \

@@ -9,6 +9,7 @@ docker run -it \
 	--net=host \
 	-e "ROS_DOMAIN_ID=7" \
 	-v /dev/shm:/dev/shm \
+	--env "ROS_DOMAIN_ID=7" \
 	osrf/ros:foxy-desktop \
 	rviz2
 
