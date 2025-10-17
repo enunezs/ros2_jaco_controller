@@ -38,13 +38,16 @@ class ControlMode(Enum):
 active_control_mode = ControlMode.GLOBAL
 
 START_ROTATION = Rotation.from_euler('xyz', [ -180-20,00-5,180-10], degrees=True)
-ROTATION_CONTROL_ENABLED = False
+ROTATION_CONTROL_ENABLED = True
 
 MAX_SPEED = (0.50,0.3,0.8) # OG X10
 #MAX_SPEED = (0.10,0.06,0.08) # OG X2
 MAX_SPEED = (0.1,0.06,0.08) # OLD
 
 CARTESIAN_MOVEMENT_ENABLED = True
+
+
+
 REFRESH_RATE = 100.0
 
 # ros2 service call /j2n6s300_driver/in/set_torque_control_mode kinova_msgs/srv/SetTorqueControlMode state:\ 1\
@@ -245,8 +248,10 @@ class JacoController(Node):
 
             if current_ee_rotation is not None:
                 rotation_vel_target = self.find_rotation_velocity(self.rotation_target_pose, current_ee_rotation)
+                # self.get_logger().info(f"Rotation vel target: {rotation_vel_target}")
             else:
                 rotation_vel_target = np.zeros(3)
+                # self.get_logger().info(f"Failed to get current rotation")
 
             # --- Finger Control ---
             finger_target_velocity = self.find_finger_velocity(self.joy_msg)
@@ -309,7 +314,8 @@ class JacoController(Node):
         ### Discrete actions ###
 
         ### Cycle to next control mode when pressing START ###
-        if joy_msg.buttons[7] == 1 and self.prev_joy_msg.buttons[7] == 0:
+        # TODO Temp changed to A button
+        if joy_msg.buttons[0] == 1 and self.prev_joy_msg.buttons[0] == 0:
             # Switch control mode, increase index by one
             global active_control_mode
             active_control_mode = ControlMode((active_control_mode.value + 1) % len(ControlMode))
@@ -352,7 +358,7 @@ class JacoController(Node):
     def find_linear_velocity(self, joy_msg) -> np.ndarray:
 
         # If cartesian movement is disabled, return 0,0,0
-        if not self.cartesian_movement_enabled:
+        if not self.cartesian_movement_enabled or active_control_mode != ControlMode.GLOBAL:
             return np.zeros(3)
 
         # Target vel update
@@ -497,11 +503,13 @@ class JacoController(Node):
 
         ### ROTATION FROM CONTROLLER ###
         orientation_change = np.zeros(3)
-        if ROTATION_CONTROL_ENABLED:
-            orientation_change[0] = (-joy_msg.axes[4] ) 
-            orientation_change[1] = (-joy_msg.axes[3] )  
-            orientation_change[2] = (joy_msg.buttons[5] - joy_msg.buttons[4]) 
-            orientation_change = orientation_change * 20.0
+        if active_control_mode != ControlMode.GLOBAL and ROTATION_CONTROL_ENABLED:
+            orientation_change[0] = (joy_msg.buttons[5] - joy_msg.buttons[2])  
+            orientation_change[1] = (-joy_msg.axes[1] )  
+            orientation_change[2] = (-joy_msg.axes[0] )
+            orientation_change = orientation_change * 10.0
+
+            self.get_logger().info(f"Raw rotation change: {orientation_change}")
 
         # Clamp rotation
         MAX_ROTATION_CHANGE = 60.0
