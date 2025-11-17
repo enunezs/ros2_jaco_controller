@@ -92,7 +92,7 @@ class PIDController:
             return np.zeros(self.length)
 
         current_error = target_vel - current_vel
-        print("Current error:", current_error)
+        # print("Current error:", current_error)
 
         # Integral term with anti-windup
         self.integral_error += current_error * (1.0 / self.refresh_rate)
@@ -215,7 +215,69 @@ class RotationController:
         self.cumulative_rotation = np.zeros(3)
         self.discretize_enabled = True
 
-    def update_from_input(self, orientation_change: np.ndarray, dt: float) -> Rotation:
+    def update_from_input(self, orientation_input: np.ndarray, dt: float) -> Rotation:
+        """
+        Bi-stable rotation update:
+        - When user is moving -> follow velocity input
+        - When user stops -> settle to nearest quantized zone
+        """
+        
+        orientation_change = orientation_input * 10.0
+        # ---------------------------------------
+        # 1. Clamp user angular input
+        # ---------------------------------------
+        MAX_ROTATION_CHANGE = 60.0
+        orientation_change = np.clip(
+            orientation_change,
+            -MAX_ROTATION_CHANGE,
+            MAX_ROTATION_CHANGE
+        )
+
+        # ---------------------------------------
+        # 2. Check whether the user is actually moving
+        # ---------------------------------------
+        input_deadband = 0.01  # small threshold to detect "no movement"
+        user_active = np.linalg.norm(orientation_change) > input_deadband
+
+        # ---------------------------------------
+        # 3. Integrate continuous motion when user is active
+        # ---------------------------------------
+        if user_active:
+            self.cumulative_rotation += orientation_change * dt
+
+        # ---------------------------------------
+        # 4. Compute nearest quantized target (wrap-safe)
+        # ---------------------------------------
+        q = self.quantization_degrees
+        quantized_target = np.round(self.cumulative_rotation / q) * q
+
+        # print in degrees
+        # print("Quantized target rotation (deg):", np.degrees(quantized_target))
+
+        # ---------------------------------------
+        # 5. If user is inactive → smoothly settle to quantized zone
+        # ---------------------------------------
+        if not user_active:
+            # settling gain per second
+            settle_gain = 6.0      # higher → faster snapping (critically damped feel)
+            alpha = 1 - np.exp(-settle_gain * dt)
+            
+            # Smoothly blend toward quantized value
+            self.cumulative_rotation = (
+                (1 - alpha) * self.cumulative_rotation +
+                alpha * quantized_target
+            )
+
+        # ---------------------------------------
+        # 6. Convert to rotation
+        # ---------------------------------------
+        rot_controller = Rotation.from_euler('xyz', self.cumulative_rotation, degrees=True)
+
+
+        return self.start_rotation * rot_controller
+
+
+    def old_update_from_input(self, orientation_change: np.ndarray, dt: float) -> Rotation:
         """
         Update rotation target from input.
         
@@ -226,6 +288,9 @@ class RotationController:
         Returns:
             Target rotation as Rotation object
         """
+
+        # print("Orientation change input:", orientation_change)
+
         # Clamp rotation rate
         MAX_ROTATION_CHANGE = 60.0
         orientation_change = np.clip(orientation_change, 
@@ -335,6 +400,7 @@ class ContinuousTeleopBehavior(ControlBehavior):
         if not self.controller.current_pose:
             return None
         
+        ### Message Extraction ###
         # Extract linear velocity
         target_linear_vel = np.array([
             twist.twist.linear.x,
@@ -349,6 +415,7 @@ class ContinuousTeleopBehavior(ControlBehavior):
             twist.twist.angular.z
         ])
         
+        ### Cartesian Velocity ###
         # Transform velocity to appropriate frame if needed
         if twist.header.frame_id != self.reference_frame:
             target_linear_vel = self.controller.transform_velocity(
@@ -357,16 +424,13 @@ class ContinuousTeleopBehavior(ControlBehavior):
                 self.reference_frame
             )
 
-        # TODO: HERE - Handle rotation control if in rotation mode
         # Apply velocity integrator for smooth acceleration
         target_linear_vel = self.controller.vel_integrator.update(
             target_linear_vel, 
             dt=1.0 / 100.0
         )
 
-        # print("Integrated linear velocity:", target_linear_vel)
-
-        # Apply PID control for linear velocity
+        # Apply PID for linear velocity
         if self.controller.current_vel is not None:
             pid_correction = self.controller.pid_linear.control_update(
                 target_linear_vel, 
@@ -375,16 +439,44 @@ class ContinuousTeleopBehavior(ControlBehavior):
             # TODO: Fixed, but likely needs retuning
             # target_linear_vel = pid_correction
         
+        ### ! Angular Position Control ###
+        # print("=== Angular Control ===")
+        # print("Target angular vel input:", target_angular_vel)
+        # Find the current end-effector rotation
+        current_ee_rotation = self.controller.get_ee_rotation()
+        # print("Current EE rotation:", current_ee_rotation.as_euler('xyz', degrees=True) if current_ee_rotation else "None")
+
+        ### ! Problems here
+        # Find the target rotation pose
+        # TODO: AHA Discretize here
+        self.rotation_target_pose = self.controller.rotation_controller.update_from_input(
+            # self.controller.current_pose, 
+            target_angular_vel,
+            dt=1.0 / 100.0
+        )
+        # print("Rotation target pose:", self.rotation_target_pose.as_euler('xyz', degrees=True))
+
+        # Use the current and target rotations to compute a target angular velocity
+        if current_ee_rotation is not None:
+            target_angular_vel = self.controller.rotation_controller.compute_velocity(
+                self.rotation_target_pose, 
+                current_ee_rotation, 
+                pid_controller= None
+                # pid_controller=self.controller.pid_angular if self.controller.pid_enabled else None
+            )
+        else:
+            target_angular_vel = np.zeros(3)
+        # print("Computed target angular vel:", target_angular_vel)
+
         # Apply PID control for angular velocity (if angular command present)
-        if np.linalg.norm(target_angular_vel) > 0.01:
+        # if np.linalg.norm(target_angular_vel) > 0.01:
             # For continuous angular control, we can directly use the target
             # Or apply PID if we have angular velocity feedback
-            # TODO: AHA Discretize here
-            pid_angular_correction = self.controller.pid_angular.control_update(
-                target_angular_vel, 
-                self.controller.current_vel[3:6]
-            )
-
+            # pid_angular_correction = self.controller.pid_angular.control_update(
+            #     target_angular_vel, 
+            #     self.controller.current_vel[3:6]
+            # )
+        # print("PID angular correction:", pid_angular_correction)
         
         # Pack into message
         msg = PoseVelocityWithFingerVelocity()
@@ -402,6 +494,26 @@ class ContinuousTeleopBehavior(ControlBehavior):
         
         return msg
     
+    def process_discrete_command(self, pose: PoseStamped) -> bool:
+        """Continuous mode ignores discrete commands."""
+        self.controller.get_logger().warn(
+            "Discrete command received in continuous mode - ignoring"
+        )
+        return False
+    
+    def on_enter(self):
+        """Reset integrators when entering continuous mode."""
+        self.controller.get_logger().info(
+            f"Entered continuous teleop mode (frame: {self.reference_frame})"
+        )
+        self.controller.pid_linear.reset()
+        self.controller.pid_angular.reset()
+    
+    def on_exit(self):
+        """Send zero velocity when exiting."""
+        self.controller.get_logger().info("Exiting continuous teleop mode")
+        self.controller.publish_zero_velocity()
+
 # ============================================================================
 # EXTENDED BEHAVIOR IMPLEMENTATIONS (Optional enhancements)
 # ============================================================================
@@ -469,26 +581,6 @@ class HybridTeleopBehavior(ControlBehavior):
         if self.discrete_behavior.executing_action:
             self.discrete_behavior.on_exit()
 
-
-    def process_discrete_command(self, pose: PoseStamped) -> bool:
-        """Continuous mode ignores discrete commands."""
-        self.controller.get_logger().warn(
-            "Discrete command received in continuous mode - ignoring"
-        )
-        return False
-    
-    def on_enter(self):
-        """Reset integrators when entering continuous mode."""
-        self.controller.get_logger().info(
-            f"Entered continuous teleop mode (frame: {self.reference_frame})"
-        )
-        self.controller.pid_linear.reset()
-        self.controller.pid_angular.reset()
-    
-    def on_exit(self):
-        """Send zero velocity when exiting."""
-        self.controller.get_logger().info("Exiting continuous teleop mode")
-        self.controller.publish_zero_velocity()
 
 
 class DiscreteTeleopBehavior(ControlBehavior):
