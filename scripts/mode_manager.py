@@ -18,9 +18,11 @@ class ModeManager(Node):
         self.get_logger().info("ModeManager starting...")
         self.current_mode = "translation"
 
-        # Publishers & subscribers
-        self.mode_pub = self.create_publisher(String, '/teleop/current_mode', 10)
+        # Subscribers
         self.mode_cmd_sub = self.create_subscription(String, '/teleop/mode_command', self.mode_command_cb, 10)
+        
+        # Publishers 
+        self.mode_pub = self.create_publisher(String, '/teleop/current_mode', 10)
 
         # Publish initial mode
         self.publish_mode()
@@ -31,6 +33,7 @@ class ModeManager(Node):
         self.mode_pub.publish(msg)
         self.get_logger().info(f"Published current_mode: {self.current_mode}")
 
+    # LATER: Add mutex to avoid changes on when running a discrete unfinished action
     def mode_command_cb(self, msg: String):
         requested = msg.data
         self.get_logger().info(f"Mode command received: {requested}")
@@ -61,6 +64,8 @@ def main(args=None):
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
+    else:
+        node.get_logger().info("ModeManager stopped unexpectedly.")
     finally:
         node.destroy_node()
         rclpy.shutdown()
