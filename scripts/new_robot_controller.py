@@ -11,24 +11,28 @@ Architecture:
 
 import rclpy
 from rclpy.node import Node
+
 from sensor_msgs.msg import Joy
 from kinova_msgs.msg import PoseVelocity, PoseVelocityWithFingerVelocity, FingerPosition
 from geometry_msgs.msg import TransformStamped, PoseStamped, WrenchStamped, Point
 from std_msgs.msg import Int32 as int_msg
 from std_msgs.msg import String as str_msg
 from geometry_msgs.msg import TwistStamped
+from nav_msgs.msg import Path
 
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 from tf2_ros.transform_broadcaster import TransformBroadcaster
 
-from scipy.spatial.transform import Rotation
-import numpy as np
 import traceback
 from abc import ABC, abstractmethod
 from collections import deque
 from typing import Optional, Tuple, Dict
+
+from scipy.spatial.transform import Rotation
+import numpy as np
+
 
 # ============================================================================
 # CONSTANTS AND CONFIGURATION
@@ -526,7 +530,7 @@ class RotationContinuousBehavior(ContinuousTeleopBehavior):
     
     def __init__(self, controller: 'RobotController'):
         super().__init__(controller, reference_frame="j2n6s300_link_base")
-        self.get_logger().info("Initialized RotationContinuousBehavior")
+        # self.get_logger().info("Initialized RotationContinuousBehavior")
     
     def process_velocity_command(self, twist: TwistStamped) -> Optional[PoseVelocityWithFingerVelocity]:
         """
@@ -548,7 +552,6 @@ class RotationContinuousBehavior(ContinuousTeleopBehavior):
             pass
         
         return msg
-
 
 class HybridTeleopBehavior(ControlBehavior):
     """
@@ -581,100 +584,544 @@ class HybridTeleopBehavior(ControlBehavior):
         if self.discrete_behavior.executing_action:
             self.discrete_behavior.on_exit()
 
-
-
 class DiscreteTeleopBehavior(ControlBehavior):
     """
     Discrete teleoperation behavior.
-    Executes discrete pose/rotation commands one at a time.
-    """
+    Internal state machine: IDLE → EXECUTING → PAUSED → COMPLETED → IDLE
     
+    Features:
+    - Executes waypoint paths using velocity control
+    - Supports pause/resume (preserves progress mid-waypoint)
+    - Position and orientation tracking with thresholds
+    - Timeout safety per waypoint
+    - Progress logging
+
+    """
+
+    # Internal execution states (independent of mode manager)
+    IDLE = "idle"
+    EXECUTING = "executing"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+
     def __init__(self, controller: 'RobotController'):
         super().__init__(controller)
-        self.executing_action = False
-        self.target_pose = None
+
+        # State management
+        self.internal_state = self.IDLE
+
+        # Waypoint queue tracking
+        self.waypoint_queue = deque()  # Queue of remaining waypoints
+        self.total_waypoints = 0       # Total waypoints in original path
+        self.current_waypoint_index = 0  # Index in original path
+        self.current_target = None      # Current target pose
+
+        # Timing
+        self.waypoint_start_time = None  # When we started approaching current waypoint
+        self.execution_start_time = None  # When entire path execution started
+        
+        # Load parameters from controller
+        self._load_parameters()
+        
+        # self.executing_action = False
+        # self.target_pose = None
+        # self.current_waypoint_index = 0
+    
+    def _load_parameters(self):
+        """Load behavior-specific parameters from controller."""
+
+        # Speed as percentage of max velocity
+        self.discrete_motion_speed = getattr(
+            self.controller, 'discrete_motion_speed', 0.5
+        )
+        # Completion thresholds
+        self.position_threshold = getattr(
+            self.controller, 'waypoint_position_threshold', 0.005  # 5mm
+        )
+        self.orientation_threshold_deg = getattr(
+            self.controller, 'waypoint_orientation_threshold_deg', 5.0  # 5 degrees
+        )
+        
+        # Safety timeout per waypoint
+        self.waypoint_timeout_sec = getattr(
+            self.controller, 'waypoint_timeout_sec', 8.0  # 8 seconds
+        )
+    
+        self.controller.get_logger().info(
+            f"DiscreteTeleopBehavior initialized with thresholds: "
+            f"speed={self.discrete_motion_speed*100:.0f}%, "
+            f"pos={self.position_threshold*1000:.1f}mm, "
+            f"orient={self.orientation_threshold_deg:.1f}deg, "
+            f"timeout={self.waypoint_timeout_sec:.1f}s, "
+        )
+    
+        
+    # ========================================================================
+    # BEHAVIOR INTERFACE (required by ControlBehavior)
+    # Needs to include defs for process_velocity_command and process_discrete_command 
+    # ========================================================================
     
     def process_velocity_command(self, twist: TwistStamped) -> Optional[PoseVelocityWithFingerVelocity]:
         """
-        In discrete mode, continuous commands are ignored or could be used for preview.
-        """
-        return None
-    
-    def process_discrete_command(self, pose: PoseStamped) -> bool:
-        """
-        Execute discrete movement command.
+        Execute waypoint following using velocity control.
+        
+        This is called every control tick when in discrete mode.
+        Ignores incoming twist commands - uses internal waypoint logic instead.
         
         Args:
-            pose: Target pose (relative transform)
+            twist: Incoming velocity command (ignored in discrete mode)
             
         Returns:
-            True if command was accepted
+            Velocity command to reach current waypoint, or None if idle, paused or completed.
         """
-        if self.executing_action:
+        # Do nothing if idle or paused
+        if self.internal_state in [self.IDLE, self.PAUSED]:
+            return None
+        
+        # Check if execution completed
+        if self.internal_state == self.COMPLETED:
+            return None
+        
+        # Check if queue is empty (shouldn't happen if state management is correct)
+        if not self.waypoint_queue:
+            self._handle_completion()
+            return None
+        
+        # Initialize current target if needed
+        if self.current_target is None:
+            self.current_target = self.waypoint_queue[0]
+            self.waypoint_start_time = self.controller.get_clock().now()
+            self.controller.get_logger().info(
+                f"Starting waypoint {self.current_waypoint_index + 1}/{self.total_waypoints}"
+            )
+        
+        # Check for timeout on current waypoint
+        if self._check_timeout():
             self.controller.get_logger().warn(
-                "Discrete action already in progress - ignoring new command"
+                f"Waypoint {self.current_waypoint_index + 1}/{self.total_waypoints} "
+                f"timeout after {self.waypoint_timeout_sec}s - skipping to next"
+            )
+            self._advance_waypoint()
+            return None
+        
+        # Check if we've reached the current waypoint
+        if self._check_reached_waypoint():
+            self.controller.get_logger().info(
+                f"✓ Reached waypoint {self.current_waypoint_index + 1}/{self.total_waypoints}"
+            )
+            self._advance_waypoint()
+            
+            # Return None this tick to allow state to settle
+            return None
+        
+        # Compute velocity toward current waypoint
+        return self._compute_velocity_to_target()
+
+
+    def process_discrete_command(self, pose: PoseStamped) -> bool:
+        """
+        Single discrete pose commands are not used in this behavior.
+        Use load_waypoints() instead to load full paths.
+        
+        Returns:
+            False (command not handled)
+        """
+        self.controller.get_logger().warn(
+            "Single discrete pose command received but DiscreteTeleopBehavior "
+            "uses waypoint paths. Use /teleop/waypoint_path instead."
+        )
+        return False
+
+    def on_enter(self):
+        """
+        Called when mode switches TO discrete.
+        
+        If execution was paused, this allows it to resume.
+        If idle, waits for waypoint list to be loaded.
+        """
+        
+        self.controller.get_logger().info("Entered discrete teleop mode")
+        
+        if self.internal_state == self.PAUSED:
+            self.controller.get_logger().info(
+                f"Resuming paused execution at waypoint "
+                f"{self.current_waypoint_index + 1}/{self.total_waypoints}"
+            )
+            # Don't automatically resume - wait for explicit resume command
+            # User can send resume_waypoints if desired
+
+        elif self.internal_state == self.IDLE:
+            self.controller.get_logger().info(
+                "Waiting for waypoint path (send to /teleop/waypoint_path)"
+            )
+            # Don't automatically resume - wait for explicit resume command
+
+    def on_exit(self):
+        """
+        Called when mode switches AWAY from discrete.
+        
+        Option A (implemented): Auto-pause execution, preserving progress.
+        User can return to discrete mode to resume.
+        """
+        self.controller.get_logger().info("Exiting discrete teleop mode")
+        
+        # If currently executing, auto-pause (Option A)
+        if self.internal_state == self.EXECUTING:
+            self.internal_state = self.PAUSED
+            self.controller.get_logger().info(
+                f"Execution auto-paused at waypoint "
+                f"{self.current_waypoint_index + 1}/{self.total_waypoints}. "
+                "Return to discrete mode to resume."
+            )
+        
+        # Always stop motion when leaving mode
+        self.controller.publish_zero_velocity()
+    
+    
+    # ========================================================================
+    # WAYPOINT MANAGEMENT
+    # ========================================================================
+    
+    def load_waypoints(self, path: Path):
+        """
+        Load a new waypoint path for execution.
+        
+        Can only load when IDLE. If execution is in progress, must stop first.
+        
+        Args:
+            path: nav_msgs/Path message with waypoint list
+            
+        Returns:
+            True if waypoints loaded successfully, False otherwise
+        """
+        if self.internal_state != self.IDLE:
+            self.controller.get_logger().warn(
+                f"Cannot load waypoints in state '{self.internal_state}'. "
+                "Send stop_waypoints command first."
             )
             return False
         
+        if not path.poses:
+            self.controller.get_logger().error("Received empty waypoint path")
+            return False
+        
+        # Load waypoints into queue
+        self.waypoint_queue = deque(path.poses)
+        self.total_waypoints = len(path.poses)
+        self.current_waypoint_index = 0
+        self.current_target = None
+        
+        # Start execution
+        self.internal_state = self.EXECUTING
+        self.execution_start_time = self.controller.get_clock().now()
+        
         self.controller.get_logger().info(
-            f"Executing discrete command: "
-            f"pos=[{pose.pose.position.x:.3f}, {pose.pose.position.y:.3f}, {pose.pose.position.z:.3f}] "
-            f"frame={pose.header.frame_id}"
+            f"========================================"
         )
-        
-        self.target_pose = pose
-        self.executing_action = True
-        
-        # TODO: Implement actual discrete movement execution
-        # Options:
-        # 1. Use action client to send pose goal
-        # 2. Generate trajectory and execute
-        # 3. Use velocity control with goal checking
-        
-        # For now, simulate with a simple approach
-        self._execute_discrete_movement()
+        self.controller.get_logger().info(
+            f"Loaded {self.total_waypoints} waypoints, starting execution"
+        )
+        self.controller.get_logger().info(
+            f"Speed: {self.discrete_motion_speed*100:.0f}% of max velocity"
+        )
+        self.controller.get_logger().info(
+            f"========================================"
+        )
         
         return True
     
-    def _execute_discrete_movement(self):
+    def _advance_waypoint(self):
         """
-        Execute the discrete movement.
-        This is a simplified version - in practice you'd use action clients or trajectories.
+        Move to the next waypoint in the queue.
+        Handles completion when queue is empty.
         """
-        # Check if rotation or translation
-        quat = self.target_pose.pose.orientation
-        is_rotation = not (quat.w == 1.0 and quat.x == 0.0 and quat.y == 0.0 and quat.z == 0.0)
+        # Remove completed waypoint
+        if self.waypoint_queue:
+            self.waypoint_queue.popleft()
         
-        if is_rotation:
-            self.controller.get_logger().info("Executing discrete rotation")
-            # Apply rotation relative to current pose
-            current_rot = self.controller.get_ee_rotation()
-            if current_rot is not None:
-                target_rot_delta = Rotation.from_quat([
-                    quat.x, quat.y, quat.z, quat.w
-                ])
-                # Compute and execute rotation
-                # In real implementation, this would be an action or trajectory
+        # Increment index
+        self.current_waypoint_index += 1
+        
+        # Clear current target
+        self.current_target = None
+        
+        # Check if we've completed all waypoints
+        if not self.waypoint_queue:
+            self._handle_completion()
         else:
-            self.controller.get_logger().info("Executing discrete translation")
-            # Apply translation relative to current pose
-            # In real implementation, this would be an action or trajectory
+            # Log progress to next waypoint
+            self.controller.get_logger().info(
+                f"→ Moving to waypoint {self.current_waypoint_index + 1}/{self.total_waypoints}"
+            )
+    
+    def _handle_completion(self):
+        """
+        Handle completion of entire waypoint path.
+        Logs completion time and returns to IDLE state.
+        """
+        if self.execution_start_time:
+            elapsed = (self.controller.get_clock().now() - self.execution_start_time).nanoseconds / 1e9
+            self.controller.get_logger().info(
+                f"========================================"
+            )
+            self.controller.get_logger().info(
+                f"✓ Waypoint execution COMPLETED"
+            )
+            self.controller.get_logger().info(
+                f"Total waypoints: {self.total_waypoints}"
+            )
+            self.controller.get_logger().info(
+                f"Total time: {elapsed:.1f} seconds"
+            )
+            self.controller.get_logger().info(
+                f"========================================"
+            )
         
-        # Mark as complete (in real implementation, this would be done by action callback)
-        self.executing_action = False
+        # Return to idle state
+        self.internal_state = self.IDLE
+        self.waypoint_queue.clear()
+        self.current_target = None
+        self.current_waypoint_index = 0
+        self.total_waypoints = 0
+        
+        # Stop motion
+        self.controller.publish_zero_velocity()
+        
+    # ========================================================================
+    # WAYPOINT TRACKING
+    # ========================================================================
+
+    def _check_reached_waypoint(self) -> bool:
+        """
+        Check if current waypoint has been reached.
+        
+        Requires both position and orientation to be within thresholds.
+        
+        Returns:
+            True if waypoint reached, False otherwise
+        """
+        if not self.controller.current_pose or not self.current_target:
+            return False
+        
+        current_pose = self.controller.current_pose
+        target_pose = self.current_target.pose
+        
+        # ===== Position Check =====
+        pos_error = np.array([
+            target_pose.position.x - current_pose.pose.position.x,
+            target_pose.position.y - current_pose.pose.position.y,
+            target_pose.position.z - current_pose.pose.position.z
+        ])
+        position_distance = np.linalg.norm(pos_error)
+        position_reached = position_distance < self.position_threshold
+        
+        # ===== Orientation Check =====
+        current_rot = self.controller.get_ee_rotation()
+        if current_rot is None:
+            # If we can't get rotation, only check position
+            return position_reached
+        
+        target_rot = Rotation.from_quat([
+            target_pose.orientation.x,
+            target_pose.orientation.y,
+            target_pose.orientation.z,
+            target_pose.orientation.w
+        ])
+        
+        # Compute rotation difference
+        rot_diff = current_rot.inv() * target_rot
+        
+        # Get angle magnitude from quaternion
+        angle_error_rad = 2 * np.arccos(np.clip(abs(rot_diff.as_quat()[3]), 0.0, 1.0))
+        angle_error_deg = np.degrees(angle_error_rad)
+        orientation_reached = angle_error_deg < self.orientation_threshold_deg
+        
+        # Debug logging (can be commented out for production)
+        self.controller.get_logger().info(
+            f"Waypoint tracking - pos: {position_distance*1000:.1f}mm "
+            f"(thresh: {self.position_threshold*1000:.1f}mm), "
+            f"orient: {angle_error_deg:.1f}deg "
+            f"(thresh: {self.orientation_threshold_deg:.1f}deg)"
+        )
+        
+        return position_reached and orientation_reached
     
-    def on_enter(self):
-        """Called when entering discrete mode."""
-        self.controller.get_logger().info("Entered discrete teleop mode")
-        self.executing_action = False
-        self.target_pose = None
+    def _check_timeout(self) -> bool:
+        """
+        Check if current waypoint has timed out.
+        
+        Returns:
+            True if timeout exceeded, False otherwise
+        """
+        if not self.waypoint_start_time:
+            return False
+        
+        elapsed = (self.controller.get_clock().now() - self.waypoint_start_time).nanoseconds / 1e9
+        return elapsed > self.waypoint_timeout_sec
+
     
-    def on_exit(self):
-        """Cancel any in-progress actions when exiting."""
-        if self.executing_action:
-            self.controller.get_logger().warn("Canceling in-progress discrete action")
-            self.executing_action = False
-            self.target_pose = None
+    # ========================================================================
+    # VELOCITY COMPUTATION
+    # ========================================================================
+
+    def _compute_velocity_to_target(self) -> PoseVelocityWithFingerVelocity:
+        """
+        Compute velocity command to move toward current waypoint target.
+        
+        Uses proportional control with speed scaling:
+        - Direction: unit vector toward target
+        - Magnitude: scaled by discrete_motion_speed parameter
+        
+        Returns:
+            Velocity command message
+        """
+
+        if not self.controller.current_pose or not self.current_target:
+            # Safety: return zero velocity if state is invalid
+            msg = PoseVelocityWithFingerVelocity()
+            return msg
+        
+        current_pose = self.controller.current_pose
+        target_pose = self.current_target.pose
+        
+        # ===== Linear Velocity (Position Control) =====
+        pos_error = np.array([
+            target_pose.position.x - current_pose.pose.position.x,
+            target_pose.position.y - current_pose.pose.position.y,
+            target_pose.position.z - current_pose.pose.position.z
+        ])
+        
+        distance = np.linalg.norm(pos_error)
+        
+        if distance > 0.001:  # Avoid division by zero
+            # Compute direction toward target
+            direction = pos_error / distance
+            
+            # Scale by max velocity and speed parameter
+            max_vel = np.array(self.controller.max_linear_velocity)
+            target_velocity = direction * max_vel * self.discrete_motion_speed
+            
+            # TODO: Lets play with this
+            # Optional: Apply velocity ramping near target (smoother approach)
+            # Ramp down velocity when within 5cm of target
+            ramp_distance = 0.05  # meters
+            if distance < ramp_distance:
+                ramp_factor = distance / ramp_distance
+                target_velocity *= max(ramp_factor, 0.2)  # Minimum 20% speed
+        else:
+            target_velocity = np.zeros(3)
+        
+        # ===== Angular Velocity (Orientation Control) =====
+        current_rot = self.controller.get_ee_rotation()
+        target_rot = Rotation.from_quat([
+            target_pose.orientation.x,
+            target_pose.orientation.y,
+            target_pose.orientation.z,
+            target_pose.orientation.w
+        ])
+        
+        if current_rot is not None:
+            # Use rotation controller to compute angular velocity
+            angular_velocity = self.controller.rotation_controller.compute_velocity(
+                target_rot, 
+                current_rot, 
+                pid_controller=None  # Use proportional control only
+            )
+            
+            # Scale by speed parameter
+            angular_velocity *= self.discrete_motion_speed
+        else:
+            angular_velocity = np.zeros(3)
+        
+        # ===== Pack Into Message =====
+        msg = PoseVelocityWithFingerVelocity()
+        msg.twist_linear_x = float(target_velocity[0])
+        msg.twist_linear_y = float(target_velocity[1])
+        msg.twist_linear_z = float(target_velocity[2])
+        msg.twist_angular_x = float(angular_velocity[0])
+        msg.twist_angular_y = float(angular_velocity[1])
+        msg.twist_angular_z = float(angular_velocity[2])
+        msg.finger1 = 0.0
+        msg.finger2 = 0.0
+        msg.finger3 = 0.0
+        
+        return msg
+
+    # ========================================================================
+    # CONTROL COMMANDS (pause/resume/stop)
+    # ========================================================================
+       
+    def pause(self):
+        """
+        Pause execution, preserving current progress.
+        Can be resumed later from the same point.
+        """
+
+        if self.internal_state != self.EXECUTING:
+            self.controller.get_logger().warn(
+                f"Cannot pause from state '{self.internal_state}'"
+            )
+            return
+        
+        self.internal_state = self.PAUSED
+        self.controller.publish_zero_velocity()
+        
+        self.controller.get_logger().info(
+            f"Waypoint execution PAUSED at waypoint "
+            f"{self.current_waypoint_index + 1}/{self.total_waypoints}"
+        )
+
+        # Send sound
+        self.status_message_pub.publish(str_msg("Waypoint execution PAUSED"))
+        
+    
+    def resume(self):
+        """
+        Resume execution from paused state.
+        Continues from wherever it was paused (even mid-waypoint).
+        """
+        if self.internal_state != self.PAUSED:
+            self.controller.get_logger().warn(
+                f"Cannot resume from state '{self.internal_state}'"
+            )
+            return
+        
+        self.internal_state = self.EXECUTING
+        
+        self.controller.get_logger().info(
+            f"Waypoint execution RESUMED at waypoint "
+            f"{self.current_waypoint_index + 1}/{self.total_waypoints}"
+        )
+
+        # Send sound
+        self.status_message_pub.publish(str_msg("Waypoint execution RESUMED"))
+
+    
+    def stop(self):
+        """
+        Stop execution and clear waypoint queue.
+        Returns to IDLE state, allowing new waypoints to be loaded.
+        """
+        if self.internal_state == self.IDLE:
+            self.controller.get_logger().info("Already in IDLE state")
+            return
+        
+        # Clear all state
+        self.waypoint_queue.clear()
+        self.current_target = None
+        self.current_waypoint_index = 0
+        self.total_waypoints = 0
+        self.internal_state = self.IDLE
+        
+        # Stop motion
+        self.controller.publish_zero_velocity()
+        
+        self.controller.get_logger().info(
+            "Waypoint execution STOPPED and cleared. Ready for new waypoints."
+        )
+
+         # Send sound
+        self.status_message_pub.publish(str_msg("Waypoint execution STOPPED"))
 
 
 class SystemBehavior(ControlBehavior):
@@ -772,6 +1219,20 @@ class RobotController(Node):
         self.discretize_rotation = self.declare_parameter("discretise_rotation", True).value
         self.quantization_degrees = self.declare_parameter("quantisation_degrees", 30.0).value
         
+        # NEW: Discrete waypoint execution parameters
+        self.discrete_motion_speed = self.declare_parameter(
+            "discrete_motion_speed", 0.5).value  # 50% of max velocity
+        
+        self.waypoint_position_threshold = self.declare_parameter(
+            "waypoint_position_threshold", 0.005).value  # 5mm
+        
+        self.waypoint_orientation_threshold_deg = self.declare_parameter(
+            "waypoint_orientation_threshold_deg", 5.0).value  # 5 degrees
+        
+        self.waypoint_timeout_sec = self.declare_parameter(
+            "waypoint_timeout_sec", 10.0).value  # 10 seconds
+        
+
         # Log parameters
         self.get_logger().info("=== Parameters loaded successfully ===")
         self.get_logger().info(f"Max linear velocity: {self.max_linear_velocity}")
@@ -788,6 +1249,12 @@ class RobotController(Node):
         self.get_logger().info(f"KD angular: {self.kd_angular}")
         self.get_logger().info(f"Discretize rotation: {self.discretize_rotation}")
         self.get_logger().info(f"Quantization degrees: {self.quantization_degrees}")
+
+        # Log new parameters
+        self.get_logger().info(f"Discrete motion speed: {self.discrete_motion_speed*100:.0f}%")
+        self.get_logger().info(f"Waypoint position threshold: {self.waypoint_position_threshold*1000:.1f}mm")
+        self.get_logger().info(f"Waypoint orientation threshold: {self.waypoint_orientation_threshold_deg:.1f}deg")
+        self.get_logger().info(f"Waypoint timeout: {self.waypoint_timeout_sec:.1f}s")
 
     def _init_shared_components(self):
         """Initialize shared utility components."""
@@ -810,7 +1277,9 @@ class RobotController(Node):
         
         # Filters
         self.vel_filter = RollingAverageFilter(window_size=5)
-        
+        # TODO: Change to Exponential Moving AverageA?
+        # self.vel_filter = ExponentialMovingAverageFilter(alpha=0.1)
+
         # Velocity integrator
         self.vel_integrator = VelocityIntegrator(
             max_velocity=tuple(self.max_linear_velocity),
@@ -843,12 +1312,15 @@ class RobotController(Node):
         )
         
         # Debug publishers
+        # Used for sound
+        self.status_message_pub = self.create_publisher(str_msg, '/controller/controller_status_info', 1)
+
         self.test_target_vel_pub = self.create_publisher(Point, '/test/requested_vel_pub', 1)
         self.test_pid_vel_pub = self.create_publisher(Point, '/test/pid_target_vel_pub', 1)
         self.test_measured_vel_pub = self.create_publisher(Point, '/test/measured_vel_pub', 1)
         
         # Haptics
-        self.haptics_action_pub = self.create_publisher(str_msg, "/haptic_feedback_robot_string", 1)
+        # self.haptics_action_pub = self.create_publisher(str_msg, "/haptic_feedback_robot_string", 1)
     
     def _init_subscribers(self):
         """Initialize ROS subscribers."""
@@ -867,12 +1339,12 @@ class RobotController(Node):
             self.velocity_callback,
             10
         )
-        
+
         # Discrete commands from CommandMapper
-        self.discrete_sub = self.create_subscription(
-            PoseStamped,
-            '/teleop/discrete_pose',
-            self.discrete_callback,
+        self.waypoint_sub = self.create_subscription(
+            Path,
+            '/teleop/waypoint_path',
+            self.waypoint_path_callback,
             10
         )
         
@@ -892,6 +1364,13 @@ class RobotController(Node):
             10
         )
         
+        self.finger_sub = self.create_subscription(
+            FingerPosition,
+            '/j2n6s300_driver/out/finger_position',
+            self.update_current_finger_pose,
+            10
+        )
+
         self.force_sub = self.create_subscription(
             WrenchStamped,
             '/j2n6s300_driver/out/tool_wrench',
@@ -899,13 +1378,6 @@ class RobotController(Node):
             10
         )
         
-        self.finger_sub = self.create_subscription(
-            FingerPosition,
-            '/j2n6s300_driver/out/finger_position',
-            self.update_current_finger_pose,
-            10
-        )
-    
     def _init_tf(self):
         """Initialize TF2 components."""
         self.tf_buffer = Buffer()
@@ -917,7 +1389,7 @@ class RobotController(Node):
         self.tf_target_listener = TransformListener(self.tf_target_buffer, self)
 
     # ========================================================================
-    # CALLBACKS
+    # SUBSCRIBER CALLBACKS
     # ========================================================================
     
     def mode_callback(self, msg: str_msg):
@@ -946,17 +1418,48 @@ class RobotController(Node):
         """Store latest velocity command from CommandMapper."""
         self.latest_velocity_cmd = msg
     
-    def discrete_callback(self, msg: PoseStamped):
-        """Handle discrete pose commands from CommandMapper."""
-        if self.current_behavior:
-            self.current_behavior.process_discrete_command(msg)
-    
+    def waypoint_path_callback(self, msg: PoseStamped):
+        """
+        Handle incoming waypoint path messages.
+        Forwards to discrete behavior if in discrete mode.
+        """    
+        if self.current_mode != "discrete":
+            self.get_logger().warn(
+                f"Waypoint path received but current mode is '{self.current_mode}'. "
+                "Switch to discrete mode first."
+            )
+            return
+        
+        # Forward to discrete behavior
+        success = self.behaviors["discrete"].load_waypoints(msg)
+        
+        if not success:
+            self.get_logger().error("Failed to load waypoint path")
+                    
     def system_callback(self, msg: str_msg):
         """Handle system commands."""
         cmd = msg.data
         self.get_logger().info(f"System command received: {cmd}")
+
+        if cmd == "pause_waypoints":
+            if self.current_mode == "discrete":
+                self.behaviors["discrete"].pause()
+            else:
+                self.get_logger().warn("pause_waypoints only works in discrete mode")
+    
+        elif cmd == "resume_waypoints":
+            if self.current_mode == "discrete":
+                self.behaviors["discrete"].resume()
+            else:
+                self.get_logger().warn("resume_waypoints only works in discrete mode")
+    
+        elif cmd == "stop_waypoints":
+            if self.current_mode == "discrete":
+                self.behaviors["discrete"].stop()
+            else:
+                self.get_logger().warn("stop_waypoints only works in discrete mode")
         
-        if cmd == "reset_pose":
+        elif cmd == "reset_pose":
             self._reset_pose()
         elif cmd == "emergency_stop":
             self._emergency_stop()
@@ -1127,6 +1630,12 @@ class RobotController(Node):
         
         self.vel_pub.publish(msg)
     
+    def send_info_message(self, info: str):
+        """Send informational status message."""
+        msg = str_msg()
+        msg.data = info
+        self.status_message_pub.publish(msg)
+
     def publish_rotation_target(self, rotation: Rotation, frame_id: str, 
                                child_frame_id: str, visual_offset: list = [0.0, 0.0, 0.0]):
         """

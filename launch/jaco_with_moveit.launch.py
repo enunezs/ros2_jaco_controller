@@ -34,6 +34,6 @@ def generate_launch_description():
     )
     launch_description.add_action(moveit_robot_launch)
 
-    print("Pupil Neon Lunch is Running...")
+    print("Jaco with MoveIt is Running...")
 
     return launch_description
