@@ -553,37 +553,6 @@ class RotationContinuousBehavior(ContinuousTeleopBehavior):
         
         return msg
 
-class HybridTeleopBehavior(ControlBehavior):
-    """
-    Hybrid behavior that combines continuous and discrete control.
-    Useful for advanced control schemes.
-    """
-    
-    def __init__(self, controller: 'RobotController'):
-        super().__init__(controller)
-        self.continuous_behavior = ContinuousTeleopBehavior(controller)
-        self.discrete_behavior = DiscreteTeleopBehavior(controller)
-    
-    def process_velocity_command(self, twist: TwistStamped) -> Optional[PoseVelocityWithFingerVelocity]:
-        """Allow continuous control when no discrete action is executing."""
-        if self.discrete_behavior.executing_action:
-            return None
-        return self.continuous_behavior.process_velocity_command(twist)
-    
-    def process_discrete_command(self, pose: PoseStamped) -> bool:
-        """Execute discrete commands."""
-        return self.discrete_behavior.process_discrete_command(pose)
-    
-    def on_enter(self):
-        self.controller.get_logger().info("Entered hybrid teleop mode")
-        self.continuous_behavior.on_enter()
-    
-    def on_exit(self):
-        self.controller.get_logger().info("Exiting hybrid teleop mode")
-        self.continuous_behavior.on_exit()
-        if self.discrete_behavior.executing_action:
-            self.discrete_behavior.on_exit()
-
 class DiscreteTeleopBehavior(ControlBehavior):
     """
     Discrete teleoperation behavior.
@@ -619,7 +588,8 @@ class DiscreteTeleopBehavior(ControlBehavior):
         # Timing
         self.waypoint_start_time = None  # When we started approaching current waypoint
         self.execution_start_time = None  # When entire path execution started
-        
+        self.waypoint_elapsed_accumulated = 0.0      # Cumulative time tracker for pausing and resuming
+     
         # Load parameters from controller
         self._load_parameters()
         
@@ -655,7 +625,6 @@ class DiscreteTeleopBehavior(ControlBehavior):
             f"timeout={self.waypoint_timeout_sec:.1f}s, "
         )
     
-        
     # ========================================================================
     # BEHAVIOR INTERFACE (required by ControlBehavior)
     # Needs to include defs for process_velocity_command and process_discrete_command 
@@ -717,7 +686,6 @@ class DiscreteTeleopBehavior(ControlBehavior):
         # Compute velocity toward current waypoint
         return self._compute_velocity_to_target()
 
-
     def process_discrete_command(self, pose: PoseStamped) -> bool:
         """
         Single discrete pose commands are not used in this behavior.
@@ -776,7 +744,6 @@ class DiscreteTeleopBehavior(ControlBehavior):
         
         # Always stop motion when leaving mode
         self.controller.publish_zero_velocity()
-    
     
     # ========================================================================
     # WAYPOINT MANAGEMENT
@@ -845,6 +812,11 @@ class DiscreteTeleopBehavior(ControlBehavior):
         # Clear current target
         self.current_target = None
         
+        # Reset timing values for next waypoint
+        self.waypoint_elapsed_accumulated = 0.0
+        self.waypoint_start_time = self.controller.get_clock().now()
+
+
         # Check if we've completed all waypoints
         if not self.waypoint_queue:
             self._handle_completion()
@@ -949,16 +921,22 @@ class DiscreteTeleopBehavior(ControlBehavior):
     def _check_timeout(self) -> bool:
         """
         Check if current waypoint has timed out.
-        
+        Use active execution to allow pausing and resuming cleanly.
+
         Returns:
             True if timeout exceeded, False otherwise
         """
         if not self.waypoint_start_time:
             return False
         
-        elapsed = (self.controller.get_clock().now() - self.waypoint_start_time).nanoseconds / 1e9
-        return elapsed > self.waypoint_timeout_sec
 
+        # time since last resume
+        active_time = (self.controller.get_clock().now() - self.waypoint_start_time).nanoseconds / 1e9
+
+        # total time = accumulated before pause + newly active
+        elapsed = self.waypoint_elapsed_accumulated + active_time
+
+        return elapsed > self.waypoint_timeout_sec
     
     # ========================================================================
     # VELOCITY COMPUTATION
@@ -1063,6 +1041,15 @@ class DiscreteTeleopBehavior(ControlBehavior):
             )
             return
         
+        # Add active time to accumulated buffer
+        if self.waypoint_start_time:
+            active_time = (self.controller.get_clock().now() - self.waypoint_start_time).nanoseconds / 1e9
+            self.waypoint_elapsed_accumulated += active_time
+            self.waypoint_start_time = None  # freeze timer
+            self.controller.get_logger().info(
+                f"Paused waypoint timer at {self.waypoint_elapsed_accumulated:.2f}s"
+            )
+
         self.internal_state = self.PAUSED
         self.controller.publish_zero_velocity()
         
@@ -1072,7 +1059,7 @@ class DiscreteTeleopBehavior(ControlBehavior):
         )
 
         # Send sound
-        self.status_message_pub.publish(str_msg("Waypoint execution PAUSED"))
+        # self.status_message_pub.publish(str_msg("Waypoint execution PAUSED"))
         
     
     def resume(self):
@@ -1088,13 +1075,17 @@ class DiscreteTeleopBehavior(ControlBehavior):
         
         self.internal_state = self.EXECUTING
         
+
+        # Resume timing from current moment
+        self.waypoint_start_time = self.controller.get_clock().now()
+
         self.controller.get_logger().info(
             f"Waypoint execution RESUMED at waypoint "
             f"{self.current_waypoint_index + 1}/{self.total_waypoints}"
         )
 
         # Send sound
-        self.status_message_pub.publish(str_msg("Waypoint execution RESUMED"))
+        # self.status_message_pub.publish(str_msg("Waypoint execution RESUMED"))
 
     
     def stop(self):
@@ -1121,8 +1112,7 @@ class DiscreteTeleopBehavior(ControlBehavior):
         )
 
          # Send sound
-        self.status_message_pub.publish(str_msg("Waypoint execution STOPPED"))
-
+        # self.status_message_pub.publish(str_msg("Waypoint execution STOPPED"))
 
 class SystemBehavior(ControlBehavior):
     """
