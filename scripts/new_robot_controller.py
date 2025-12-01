@@ -614,7 +614,7 @@ class DiscreteTeleopBehavior(ControlBehavior):
         
         # Safety timeout per waypoint
         self.waypoint_timeout_sec = getattr(
-            self.controller, 'waypoint_timeout_sec', 8.0  # 8 seconds
+            self.controller, 'waypoint_timeout_sec', 20.0  # 8 seconds
         )
     
         self.controller.get_logger().info(
@@ -909,12 +909,12 @@ class DiscreteTeleopBehavior(ControlBehavior):
         orientation_reached = angle_error_deg < self.orientation_threshold_deg
         
         # Debug logging (can be commented out for production)
-        self.controller.get_logger().info(
-            f"Waypoint tracking - pos: {position_distance*1000:.1f}mm "
-            f"(thresh: {self.position_threshold*1000:.1f}mm), "
-            f"orient: {angle_error_deg:.1f}deg "
-            f"(thresh: {self.orientation_threshold_deg:.1f}deg)"
-        )
+        # self.controller.get_logger().debug(
+        #     f"Waypoint tracking - pos: {position_distance*1000:.1f}mm "
+        #     f"(thresh: {self.position_threshold*1000:.1f}mm), "
+        #     f"orient: {angle_error_deg:.1f}deg "
+        #     f"(thresh: {self.orientation_threshold_deg:.1f}deg)"
+        # )
         
         return position_reached and orientation_reached
     
@@ -962,30 +962,48 @@ class DiscreteTeleopBehavior(ControlBehavior):
         current_pose = self.controller.current_pose
         target_pose = self.current_target.pose
         
-        # ===== Linear Velocity (Position Control) =====
+
+        # =====================================================================
+        # LINEAR VELOCITY CONTROL (PID version)
+        # =====================================================================
         pos_error = np.array([
             target_pose.position.x - current_pose.pose.position.x,
             target_pose.position.y - current_pose.pose.position.y,
             target_pose.position.z - current_pose.pose.position.z
         ])
+
+        # self.controller.get_logger().info(
+        #     f"Position error to waypoint: "
+        #     f"x={pos_error[0]*1000:.0f}mm, "
+        #     f"y={pos_error[1]*1000:.0f}mm, "
+        #     f"z={pos_error[2]*1000:.0f}mm"
+        # )
+
+         # Compute distance to target
         
         distance = np.linalg.norm(pos_error)
         
         if distance > 0.001:  # Avoid division by zero
-            # Compute direction toward target
             direction = pos_error / distance
             
-            # Scale by max velocity and speed parameter
+            # Provisional feed-forward velocity (what we *want* to achieve)
             max_vel = np.array(self.controller.max_linear_velocity)
             target_velocity = direction * max_vel * self.discrete_motion_speed
             
-            # TODO: Lets play with this
-            # Optional: Apply velocity ramping near target (smoother approach)
+            # Optional: velocity ramping 
             # Ramp down velocity when within 5cm of target
-            ramp_distance = 0.05  # meters
-            if distance < ramp_distance:
-                ramp_factor = distance / ramp_distance
-                target_velocity *= max(ramp_factor, 0.2)  # Minimum 20% speed
+            # ramp_distance = 0.05  # meters
+            # if distance < ramp_distance:
+            #     ramp_factor = distance / ramp_distance
+            #     target_velocity *= max(ramp_factor, 0.2)  # Minimum 20% speed
+
+            pid_correction = self.controller.pid_linear.control_update(
+                target_velocity,
+                self.controller.current_vel[0:3]     # must contain vx,vy,vz
+            )
+
+            target_velocity = pid_correction       # PID output drives robot
+
         else:
             target_velocity = np.zeros(3)
         
@@ -1061,7 +1079,6 @@ class DiscreteTeleopBehavior(ControlBehavior):
         # Send sound
         # self.status_message_pub.publish(str_msg("Waypoint execution PAUSED"))
         
-    
     def resume(self):
         """
         Resume execution from paused state.
@@ -1087,7 +1104,6 @@ class DiscreteTeleopBehavior(ControlBehavior):
         # Send sound
         # self.status_message_pub.publish(str_msg("Waypoint execution RESUMED"))
 
-    
     def stop(self):
         """
         Stop execution and clear waypoint queue.
@@ -1211,7 +1227,7 @@ class RobotController(Node):
         
         # NEW: Discrete waypoint execution parameters
         self.discrete_motion_speed = self.declare_parameter(
-            "discrete_motion_speed", 0.5).value  # 50% of max velocity
+            "discrete_motion_speed", 1.5).value  # 150% of max velocity
         
         self.waypoint_position_threshold = self.declare_parameter(
             "waypoint_position_threshold", 0.005).value  # 5mm
@@ -1220,7 +1236,7 @@ class RobotController(Node):
             "waypoint_orientation_threshold_deg", 5.0).value  # 5 degrees
         
         self.waypoint_timeout_sec = self.declare_parameter(
-            "waypoint_timeout_sec", 10.0).value  # 10 seconds
+            "waypoint_timeout_sec", 20.0).value  # 20 seconds
         
 
         # Log parameters
