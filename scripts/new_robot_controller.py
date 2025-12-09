@@ -49,50 +49,6 @@ ROBOT_BASE_FRAME = "j2n6s300_link_base"
 ROTATION_ASSISTANCE = 2.0   
 
 
-    # ==========================
-    # TF HELPER FUNCTIONS
-    # ==========================
-
-    def transform_vector(self, vector: np.ndarray, source_frame: str, target_frame: str) -> np.ndarray:
-        """Rotates a vector from source frame to target frame."""
-        if source_frame == target_frame:
-            return vector
-        try:
-            # We only care about rotation for vectors
-            transform = self.tf_buffer.lookup_transform(target_frame, source_frame, rclpy.time.Time())
-            rot = Rotation.from_quat([
-                transform.transform.rotation.x,
-                transform.transform.rotation.y,
-                transform.transform.rotation.z,
-                transform.transform.rotation.w
-            ])
-            return rot.apply(vector)
-        except (LookupException, ConnectivityException, ExtrapolationException):
-            self.get_logger().warn(f"Could not transform vector {source_frame} -> {target_frame}")
-            return vector
-
-    def get_frame_rotation(self, source_frame: str, target_frame: str) -> Optional[Rotation]:
-        """Gets the rotation of source_frame represented in target_frame."""
-        if not source_frame or source_frame == target_frame:
-            return None # Identity
-        try:
-            transform = self.tf_buffer.lookup_transform(target_frame, source_frame, rclpy.time.Time())
-            return Rotation.from_quat([
-                transform.transform.rotation.x,
-                transform.transform.rotation.y,
-                transform.transform.rotation.z,
-                transform.transform.rotation.w
-            ])
-        except (LookupException, ConnectivityException, ExtrapolationException):
-            return None
-
-    def get_ee_rotation(self) -> Optional[Rotation]:
-        return self.get_frame_rotation('j2n6s300_end_effector', ROBOT_BASE_FRAME)
-
-    def publish_zero_velocity(self):
-        msg = PoseVelocityWithFingerVelocity()
-        self.vel_pub.publish(msg)
-
 # ============================================================================
 # SHARED UTILITY COMPONENTS
 # ============================================================================
@@ -268,7 +224,9 @@ class RotationController:
 
         self.discretize_enabled = True
 
-        self.cumulative_rotation : Rotation = START_ROTATION
+        # Start from no rotation offset
+        self.cumulative_rotation : Rotation = Rotation.from_quat([0,0,0,1])
+
         # TODO: Add reference frame handling if needed
         self.reference_frame = "j2n6s300_link_base" #-> needs a setter?
 
@@ -289,7 +247,8 @@ class RotationController:
             basis_rotation: The rotation of the frame the input is defined in, relative to robot base.
                             If None, assumes input is already in Base frame.
         """
-        speed_factor = 2.0 # Rad/s max speed approx
+        # TODO: Expose speed factor as parameter
+        speed_factor = 0.5 # Rad/s max speed approx
         # speed_factor = 10.0
         
         # 1. Deadband
@@ -301,30 +260,36 @@ class RotationController:
             # Raw input vector
             orientation_change_vec = orientation_input * speed_factor * dt
 
-        # 2. Transform Input to Base Frame
-        # If the user pushes "Forward" (X) in the Camera Frame, and the Camera is rotated 90 deg,
-        # we need to apply that rotation to the vector so the robot moves correctly in Base frame.
-        if basis_rotation is not None and user_active:
-            # Rotate the input vector by the basis rotation
-            orientation_change_vec = basis_rotation.apply(orientation_change_vec)
+        # TODO: Changes: quantisation should only affect the accumulation offset, not the basis
 
-        # 3. Apply Integration (Quaternion Multiplication)
+        # 2. Integrate for cummulative rotation (Quaternion Multiplication)
         if user_active:
             # Create a small rotation from the vector
             # Magnitude of vector = angle in radians, Direction = axis
-            rot_delta = Rotation.from_rotvec(orientation_change_vec)
+            # rot_delta = Rotation.from_rotvec(orientation_change_vec, degrees=False)
+            rot_delta = Rotation.from_euler('xyz', orientation_change_vec, degrees=False)
+
             # Apply: New = Delta * Old (Intrinsic) or Old * Delta (Extrinsic)
             # Usually for "Base Frame" accumulation, we want:
-            self.cumulative_rotation = rot_delta * self.cumulative_rotation
+            self.cumulative_rotation = self.cumulative_rotation * rot_delta
 
-        # 4. Quantization / Snapping
+        # 3. Quantization / Snapping
         # Convert to Euler for grid snapping, then back
         # Note: We snap in the BASE frame (xyz), which is usually what feels "straight"
         current_euler = self.cumulative_rotation.as_euler('xyz', degrees=True)
         q = self.quantization_degrees
         target_euler_snapped = np.round(current_euler / q) * q
-        target_rot_snapped = Rotation.from_euler('xyz', target_euler_snapped, degrees=True)
-        
+        target_rot_snapped : Rotation = Rotation.from_euler('xyz', target_euler_snapped, degrees=True)
+        # self.get_logger().info("Snapped Euler (deg):", target_euler_snapped)
+
+        # 4. Apply goal as composition between the quantised offset and the basis
+        # 4. Transform Input to Base Frame
+        # If the user pushes "Forward" (X) in the Camera Frame, and the Camera is rotated 90 deg,
+        # we need to apply that rotation to the vector so the robot moves correctly in Base frame.
+        if basis_rotation is not None and user_active:
+            # Rotate the input vector by the basis rotation
+            target_rot_snapped = basis_rotation * target_rot_snapped
+
         # 5. Smoothing / Settling
         if not user_active:
             # Use SLERP (Spherical Linear Interpolation) for smooth rotation
@@ -525,7 +490,10 @@ class ContinuousTeleopBehavior(ControlBehavior):
         # Extract Linear
         target_linear_vel = np.array([twist.twist.linear.x, twist.twist.linear.y, twist.twist.linear.z])
 
+        ######################################################
         ### 1. Handle Frame Transforms for Linear Velocity ###
+        ######################################################
+
         # The Twist message tells us what frame the input is in (e.g., "head_camera", "base_link")
         input_frame = twist.header.frame_id        
 
@@ -540,10 +508,12 @@ class ContinuousTeleopBehavior(ControlBehavior):
         if self.controller.current_vel is not None:
              # Basic Feedforward + PID correction
              pid_out = self.controller.pid_linear.control_update(target_linear_vel, self.controller.current_vel[0:3])
-             target_linear_vel = target_linear_vel + pid_out
+             target_linear_vel = target_linear_vel #+ pid_out
 
-
+        ##################################
         ### 2. Handle Rotation Control ###
+        ##################################
+
         target_angular_input = np.array([twist.twist.angular.x, twist.twist.angular.y, twist.twist.angular.z])
         
         # Look up the rotation of the input frame relative to base
@@ -557,6 +527,28 @@ class ContinuousTeleopBehavior(ControlBehavior):
             basis_rotation=basis_rotation
         )
         
+
+        # =========================================================
+        # NEW CODE: Visualize Target Rotation in RViz
+        # =========================================================
+        if self.controller.current_pose:
+            # We use the CURRENT position (x,y,z) so the rotation ghost 
+            # overlaps with the real gripper
+            current_xyz = [
+                self.controller.current_pose.pose.position.x,
+                self.controller.current_pose.pose.position.y,
+                self.controller.current_pose.pose.position.z
+            ]
+
+            # Publish the TF
+            self.controller.publish_rotation_target(
+                rotation=rotation_target,
+                frame_id=ROBOT_BASE_FRAME,        # Parent frame (usually link_base)
+                child_frame_id="target_orientation_ghost", 
+                visual_offset=current_xyz
+            )
+        # =========================================================
+
         # Compute Velocity to reach that target
         current_ee_rot = self.controller.get_ee_rotation()
         if current_ee_rot:
@@ -571,13 +563,12 @@ class ContinuousTeleopBehavior(ControlBehavior):
          # Construct Message
         msg = PoseVelocityWithFingerVelocity()
         msg.twist_linear_x, msg.twist_linear_y, msg.twist_linear_z = target_linear_vel
-        msg.twist_angular_x, msg.twist_angular_y, msg.twist_angular_z = target_angular_vel
+        # msg.twist_angular_x, msg.twist_angular_y, msg.twist_angular_z = target_angular_vel
 
-        # TODO
-        msg.finger_velocity1, msg.finger_velocity2, msg.finger_velocity3 = [0.0, 0.0, 0.0]
+        # TODO Finger!
+        # msg.finger_velocity1, msg.finger_velocity2, msg.finger_velocity3 = [0.0, 0.0, 0.0]
         return msg
         
-    
     def process_discrete_command(self, pose: PoseStamped) -> bool:
         """Continuous mode ignores discrete commands."""
         self.controller.get_logger().warn(
@@ -1240,393 +1231,12 @@ class SystemBehavior(ControlBehavior):
 # ============================================================================
 
 class RobotController(Node):
-    """
-    Main robot controller with mode-based behaviors.
-    Subscribes to teleop commands and publishes velocity commands to hardware.
-    """
-    
-    def __init__(self):
-        super().__init__('robot_controller')
-        self.get_logger().info("Robot Controller starting...")
-        
-        # Load parameters
-        self._load_parameters()
-        
-        # Initialize shared components
-        self._init_shared_components()
-        
-        # Initialize behaviors
-        self._init_behaviors()
-        
-        # State
-        self.current_pose = None
-        self.current_vel = None
-        self.time_prev = self.get_clock().now()
-        self.latest_velocity_cmd = None
-
-        self.current_finger_pose = np.array([0.0, 0.0, 0.0])
-
-        # Behavior
-
-This is a significant improvement. By making the rotation input relative to a specific reference frame (like the camera/user view or the end-effector tip), the control becomes much more intuitive.
-Here is the implementation. I have addressed the Mathematical issues from the previous review (Gimbal lock, wrapping bugs) and added the Frame Reference logic.
-Key Changes
-RotationController: Now accepts a basis_rotation (the rotation of the input frame relative to the robot base). It rotates the user's input vector into the Base Frame before applying it.
-ContinuousTeleopBehavior: Now extracts the frame_id from the incoming Twist message, looks up that frame's rotation via TF, and passes it to the controller.
-Math Fixes: Replaced Euler addition with Quaternion multiplication and fixed the "wrap-around" smoothing bug using slerp.
-Here is the complete, refactored code.
-code
-Python
-#!/usr/bin/env python3
-"""
-Refactored Jaco Robot Controller with Reference Frame Support
-"""
-
-import rclpy
-from rclpy.node import Node
-from rclpy.time import Time
-
-from kinova_msgs.msg import PoseVelocityWithFingerVelocity, FingerPosition
-from geometry_msgs.msg import TwistStamped, PoseStamped, WrenchStamped, Point, TransformStamped
-from std_msgs.msg import String as str_msg
-from nav_msgs.msg import Path
-
-from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
-from tf2_ros.buffer import Buffer
-from tf2_ros.transform_listener import TransformListener
-from tf2_ros.transform_broadcaster import TransformBroadcaster
-
-import traceback
-from abc import ABC, abstractmethod
-from collections import deque
-from typing import Optional, Tuple, Dict
-import numpy as np
-from scipy.spatial.transform import Rotation, Slerp
-
-# ============================================================================
-# CONSTANTS
-# ============================================================================
-
-REFRESH_RATE = 100.0
-# Define start rotation (using Quaternions internally is safer)
-START_ROTATION = Rotation.from_euler('xyz', [-180-20, 0-5, 180-10], degrees=True)
-MAX_LINEAR_VELOCITY = (0.1, 0.06, 0.08)
-MAX_ANGULAR_VELOCITY = 2.0
-MAX_FINGER_VELOCITY = 2000.0
-ROBOT_BASE_FRAME = "j2n6s300_link_base"
-
-# ============================================================================
-# UTILITIES
-# ============================================================================
-
-class PIDController:
-    """Standard PID Controller"""
-    def __init__(self, kp: float = 1.0, ki: float = 0.0, kd: float = 0.0, 
-                 refresh_rate: float = 1.0, length: int = 3, anti_windup: bool = True):
-        self.kp = kp
-        self.ki = ki
-        self.kd = kd
-        self.refresh_rate = refresh_rate
-        self.length = length
-        self.prev_error = np.zeros(self.length)
-        self.integral_error = np.zeros(self.length)
-        self.anti_windup = anti_windup
-
-    def control_update(self, target_vel: np.ndarray, current_vel: np.ndarray) -> np.ndarray:
-        if target_vel is None or current_vel is None:
-            return np.zeros(self.length)
-
-        current_error = target_vel - current_vel
-        self.integral_error += current_error * (1.0 / self.refresh_rate)
-        
-        if self.anti_windup:
-            self.integral_error = np.clip(self.integral_error, -1.0, 1.0)
-        
-        derivative_error = (current_error - self.prev_error) * self.refresh_rate
-        self.prev_error = current_error
-
-        return self.kp * current_error + self.ki * self.integral_error + self.kd * derivative_error
-
-    def reset(self):
-        self.prev_error = np.zeros(self.length)
-        self.integral_error = np.zeros(self.length)
-
-class VelocityIntegrator:
-    """Handles smooth acceleration/deceleration"""
-    def __init__(self, max_velocity: Tuple[float, float, float], refresh_rate: float = 100.0):
-        self.max_velocity = np.array(max_velocity)
-        self.prev_velocity = np.zeros(3)
-        self.forward_acceleration = np.array([0.015, 0.009, 0.012]) 
-        self.brake_acceleration = 0.8
-        self.min_speed = 0.027
-        self.deadzone = 0.2
-
-    def update(self, input_vector: np.ndarray, dt: float) -> np.ndarray:
-        velocity = self.prev_velocity.copy()
-        hard_brake_threshold = 0.02
-        
-        for idx, input_dir in enumerate(input_vector):
-            is_hard_brake = ((input_dir * velocity[idx]) < -hard_brake_threshold)
-            is_deadzone = abs(input_dir) < self.deadzone
-            movement_dir = 1 if velocity[idx] > 0 else -1
-
-            if is_deadzone or is_hard_brake:
-                velocity[idx] -= movement_dir * self.brake_acceleration * dt
-                if abs(velocity[idx]) < self.min_speed * 1.5:
-                    velocity[idx] = 0.0
-            else:
-                velocity[idx] += input_dir * self.forward_acceleration[idx] * dt
-                if abs(velocity[idx]) < self.min_speed:
-                    velocity[idx] = self.min_speed * np.sign(input_dir)
-            
-            velocity[idx] = np.clip(velocity[idx], -self.max_velocity[idx], self.max_velocity[idx])
-        
-        self.prev_velocity = velocity
-        return velocity
-
-    def reset(self):
-        self.prev_velocity = np.zeros(3)
-
-class RollingAverageFilter:
-    def __init__(self, window_size: int):
-        self.window_size = window_size
-        self.values = deque(maxlen=window_size)
-    def update(self, value: float) -> float:
-        self.values.append(value)
-        return sum(self.values) / len(self.values)
-
-# ============================================================================
-# ROTATION CONTROLLER (REFACTORED)
-# ============================================================================
-
-class RotationController:
-    """
-    Manages rotation control with frame-relative inputs and robust quaternion math.
-    """
-    
-    def __init__(self, start_rotation: Rotation, quantization_degrees: float = 30.0,
-                 max_angular_velocity: float = 2.0, refresh_rate: float = 100.0):
-        self.start_rotation = start_rotation
-        self.quantization_degrees = quantization_degrees
-        self.max_angular_velocity = max_angular_velocity
-        self.refresh_rate = refresh_rate
-        
-        # Internal state is maintained as a Rotation object (Quaternions), not Euler angles
-        self.cumulative_rotation = START_ROTATION
-
-    def update_target_rotation_from_input(self, 
-                                          orientation_input: np.ndarray, 
-                                          dt: float,
-                                          basis_rotation: Optional[Rotation] = None) -> Rotation:
-        """
-        Updates the internal target rotation based on user input relative to a specific frame.
-        
-        Args:
-            orientation_input: [rx, ry, rz] velocity request from joystick (approx -1 to 1)
-            dt: Time delta
-            basis_rotation: The rotation of the frame the input is defined in, relative to robot base.
-                            If None, assumes input is already in Base frame.
-        """
-        speed_factor = 2.0 # Rad/s max speed approx
-        
-        # 1. Deadband
-        if np.linalg.norm(orientation_input) < 0.05:
-            user_active = False
-            orientation_change_vec = np.zeros(3)
-        else:
-            user_active = True
-            # Raw input vector
-            orientation_change_vec = orientation_input * speed_factor * dt
-
-        # 2. Transform Input to Base Frame
-        # If the user pushes "Forward" (X) in the Camera Frame, and the Camera is rotated 90 deg,
-        # we need to apply that rotation to the vector so the robot moves correctly in Base frame.
-        if basis_rotation is not None and user_active:
-            # Rotate the input vector by the basis rotation
-            orientation_change_vec = basis_rotation.apply(orientation_change_vec)
-
-        # 3. Apply Integration (Quaternion Multiplication)
-        if user_active:
-            # Create a small rotation from the vector
-            # Magnitude of vector = angle in radians, Direction = axis
-            rot_delta = Rotation.from_rotvec(orientation_change_vec)
-            # Apply: New = Delta * Old (Intrinsic) or Old * Delta (Extrinsic)
-            # Usually for "Base Frame" accumulation, we want:
-            self.cumulative_rotation = rot_delta * self.cumulative_rotation
-
-        # 4. Quantization / Snapping
-        # Convert to Euler for grid snapping, then back
-        # Note: We snap in the BASE frame (xyz), which is usually what feels "straight"
-        current_euler = self.cumulative_rotation.as_euler('xyz', degrees=True)
-        q = self.quantization_degrees
-        target_euler_snapped = np.round(current_euler / q) * q
-        target_rot_snapped = Rotation.from_euler('xyz', target_euler_snapped, degrees=True)
-
-        # 5. Smoothing / Settling
-        if not user_active:
-            # Use SLERP (Spherical Linear Interpolation) for smooth rotation
-            # This fixes the wrap-around bug (359 -> 1 degree)
-            settle_gain = 6.0
-            alpha = 1 - np.exp(-settle_gain * dt)
-            
-            # Interpolate between current and snapped
-            key_times = [0, 1]
-            key_rots = Rotation.concatenate([self.cumulative_rotation, target_rot_snapped])
-            slerp = Slerp(key_times, key_rots)
-            
-            # Update current towards target
-            self.cumulative_rotation = slerp(alpha)
-
-        return self.cumulative_rotation
-
-    def compute_angular_velocity(self, target_rotation: Rotation, 
-                        current_rotation: Rotation, 
-                        pid_controller: Optional[PIDController] = None) -> np.ndarray:
-        """
-        Compute angular velocity [rx, ry, rz] to reach target.
-        """
-        # 1. Calculate error: Target * Inverse(Current) -> Difference in Global Frame
-        # Or: Current.inv * Target -> Difference in Local Frame
-        # We usually want velocity commands in the End Effector (Local) or Base frame depending on robot driver.
-        # Assuming Jaco accepts 'PoseVelocity' in Base frame (usually), but check driver!
-        # If driver takes twists in Base Frame:
-        error_rot = target_rotation * current_rotation.inv()
-        
-        # 2. Convert to Rotation Vector (Axis-Angle)
-        rot_vec = error_rot.as_rotvec() # Vector direction = axis, Magnitude = angle (rads)
-        
-        # 3. Clamp Magnitude (Safety)
-        mag = np.linalg.norm(rot_vec)
-        MAX_ERROR_RAD = 1.0 # 57 degrees
-        if mag > MAX_ERROR_RAD:
-            rot_vec = rot_vec * (MAX_ERROR_RAD / mag)
-            
-        # 4. PID or Proportional
-        if pid_controller:
-             # Assuming PID controller keeps track of dt internally
-            return pid_controller.control_update(rot_vec, np.zeros(3))
-        else:
-            return rot_vec * self.max_angular_velocity
-
-    def reset(self):
-        self.cumulative_rotation = START_ROTATION
-
-# ============================================================================
-# BEHAVIORS
-# ============================================================================
-
-class ControlBehavior(ABC):
-    def __init__(self, controller: 'RobotController'):
-        self.controller = controller
-    
-    @abstractmethod
-    def process_velocity_command(self, twist: TwistStamped) -> Optional[PoseVelocityWithFingerVelocity]:
-        pass
-    
-    @abstractmethod
-    def on_enter(self):
-        pass
-    
-    @abstractmethod
-    def on_exit(self):
-        pass
-
-class ContinuousTeleopBehavior(ControlBehavior):
-    """
-    Standard Teleop that respects the Frame ID of the input command.
-    """
-    def __init__(self, controller: 'RobotController'):
-        super().__init__(controller)
-    
-    def process_velocity_command(self, twist: TwistStamped) -> Optional[PoseVelocityWithFingerVelocity]:
-        if not self.controller.current_pose:
-            return None
-        
-        # 1. Handle Frame Transforms for Linear Velocity
-        # The Twist message tells us what frame the input is in (e.g., "head_camera", "base_link")
-        input_frame = twist.header.frame_id
-        
-        # Extract Linear
-        target_linear_vel = np.array([twist.twist.linear.x, twist.twist.linear.y, twist.twist.linear.z])
-        
-        # If input is not in base frame, rotate the linear velocity vector
-        if input_frame and input_frame != ROBOT_BASE_FRAME:
-            target_linear_vel = self.controller.transform_vector(
-                target_linear_vel, input_frame, ROBOT_BASE_FRAME
-            )
-
-        # Apply Smoothing & PID (Linear)
-        target_linear_vel = self.controller.vel_integrator.update(target_linear_vel, dt=1.0/REFRESH_RATE)
-        if self.controller.current_vel is not None:
-             # Basic Feedforward + PID correction
-             pid_out = self.controller.pid_linear.control_update(target_linear_vel, self.controller.current_vel[0:3])
-             target_linear_vel = target_linear_vel + pid_out
-
-        # 2. Handle Rotation Control
-        target_angular_input = np.array([twist.twist.angular.x, twist.twist.angular.y, twist.twist.angular.z])
-        
-        # Look up the rotation of the input frame relative to base
-        # This allows "Up" on joystick to mean "Up" in camera view, etc.
-        basis_rotation = self.controller.get_frame_rotation(input_frame, ROBOT_BASE_FRAME)
-
-        # Update the Target Orientation state
-        rotation_target = self.controller.rotation_controller.update_target_rotation_from_input(
-            target_angular_input,
-            dt=1.0/REFRESH_RATE,
-            basis_rotation=basis_rotation
-        )
-        
-        # Compute Velocity to reach that target
-        current_ee_rot = self.controller.get_ee_rotation()
-        if current_ee_rot:
-            target_angular_vel = self.controller.rotation_controller.compute_angular_velocity(
-                rotation_target,
-                current_ee_rot,
-                pid_controller=None # or self.controller.pid_angular
-            )
-        else:
-            target_angular_vel = np.zeros(3)
-
-        # Construct Message
-        msg = PoseVelocityWithFingerVelocity()
-        msg.twist_linear_x, msg.twist_linear_y, msg.twist_linear_z = target_linear_vel
-        msg.twist_angular_x, msg.twist_angular_y, msg.twist_angular_z = target_angular_vel
-        return msg
-
-    def on_enter(self):
-        self.controller.get_logger().info("Entered Continuous Teleop")
-        self.controller.pid_linear.reset()
-        self.controller.pid_angular.reset()
-
-    def on_exit(self):
-        self.controller.publish_zero_velocity()
-
-# ============================================================================
-# DISCRETE BEHAVIOR (Shortened for brevity, use previous implementation)
-# ============================================================================
-class DiscreteTeleopBehavior(ControlBehavior):
-    # ... (Keep your previous implementation of DiscreteTeleopBehavior here) ...
-    # ... It was logically sound in the previous step ...
-    def process_velocity_command(self, twist: TwistStamped):
-        return None 
-    def on_enter(self): pass
-    def on_exit(self): pass
-    def load_waypoints(self, path): pass
-    def pause(self): pass
-    def resume(self): pass
-    def stop(self): pass
-
-# ============================================================================
-# MAIN CONTROLLER
-# ============================================================================
-
-class RobotController(Node):
     def __init__(self):
         super().__init__('robot_controller')
         
         # Params
         self.max_linear_velocity = self.declare_parameter("max_linear_velocity", MAX_LINEAR_VELOCITY).value
-        self.quantization_degrees = self.declare_parameter("quantisation_degrees", 30.0).value
+        self.quantization_degrees = self.declare_parameter("quantisation_degrees", 45.0).value
         
         # Components
         self.pid_linear = PIDController(kp=0.8, ki=0.1, length=3)
@@ -1660,7 +1270,7 @@ class RobotController(Node):
             "discrete": DiscreteTeleopBehavior(self),
             # Add system, etc.
         }
-        # self.current_mode = "translation"
+        self.current_mode = "translation"
         self.current_behavior = self.behaviors["translation"]
         
         # Initialize ROS interfaces
@@ -1698,7 +1308,7 @@ class RobotController(Node):
 
         # Rotation
         self.discretize_rotation = self.declare_parameter("discretise_rotation", True).value
-        self.quantization_degrees = self.declare_parameter("quantisation_degrees", 30.0).value
+        self.quantization_degrees = self.declare_parameter("quantisation_degrees", 45.0).value
         
         # NEW: Discrete waypoint execution parameters
         self.discrete_motion_speed = self.declare_parameter(
@@ -2066,33 +1676,6 @@ class RobotController(Node):
             self.get_logger().error(f'Error transforming velocity: {e}')
             return velocity
     
-    def get_ee_rotation(self) -> Optional[Rotation]:
-        """
-        Get current end-effector rotation.
-        
-        Returns:
-            Current rotation as Rotation object, or None if unavailable
-        """
-        try:
-            transform = self.tf_buffer.lookup_transform(
-                'j2n6s300_link_base',
-                'j2n6s300_end_effector',
-                rclpy.time.Time()
-            )
-            
-            current_rot = Rotation.from_quat([
-                transform.transform.rotation.x,
-                transform.transform.rotation.y,
-                transform.transform.rotation.z,
-                transform.transform.rotation.w
-            ])
-            
-            return current_rot
-            
-        except (LookupException, ConnectivityException, ExtrapolationException) as e:
-            self.get_logger().error(f'Error getting EE rotation: {e}')
-            return None
-    
     def publish_zero_velocity(self):
         """Publish zero velocity command to stop robot."""
         msg = PoseVelocityWithFingerVelocity()
@@ -2126,6 +1709,7 @@ class RobotController(Node):
             visual_offset: Position offset for visualization
         """
         transform = TransformStamped()
+
         transform.header.stamp = self.get_clock().now().to_msg()
         transform.header.frame_id = frame_id
         transform.child_frame_id = child_frame_id
@@ -2141,6 +1725,69 @@ class RobotController(Node):
         transform.transform.rotation.w = quat[3]
         
         self.tf_broadcaster.sendTransform(transform)
+    
+    def transform_vector(self, vector: np.ndarray, source_frame: str, target_frame: str) -> np.ndarray:
+        """Rotates a vector from source frame to target frame."""
+        if source_frame == target_frame:
+            return vector
+        try:
+            # We only care about rotation for vectors
+            transform = self.tf_buffer.lookup_transform(target_frame, source_frame, rclpy.time.Time())
+            rot = Rotation.from_quat([
+                transform.transform.rotation.x,
+                transform.transform.rotation.y,
+                transform.transform.rotation.z,
+                transform.transform.rotation.w
+            ])
+            return rot.apply(vector)
+        except (LookupException, ConnectivityException, ExtrapolationException):
+            self.get_logger().warn(f"Could not transform vector {source_frame} -> {target_frame}")
+            return vector
+
+    def get_frame_rotation(self, source_frame: str, target_frame: str) -> Optional[Rotation]:
+        """Gets the rotation of source_frame represented in target_frame."""
+        if not source_frame or source_frame == target_frame:
+            return None # Identity
+        try:
+            transform = self.tf_buffer.lookup_transform(target_frame, source_frame, rclpy.time.Time())
+            return Rotation.from_quat([
+                transform.transform.rotation.x,
+                transform.transform.rotation.y,
+                transform.transform.rotation.z,
+                transform.transform.rotation.w
+            ])
+        except (LookupException, ConnectivityException, ExtrapolationException):
+            return None
+
+    def get_ee_rotation(self) -> Optional[Rotation]:
+        return self.get_frame_rotation('j2n6s300_end_effector', ROBOT_BASE_FRAME)
+
+    # def get_ee_rotation(self) -> Optional[Rotation]:
+    #     """
+    #     Get current end-effector rotation.
+        
+    #     Returns:
+    #         Current rotation as Rotation object, or None if unavailable
+    #     """
+    #     try:
+    #         transform = self.tf_buffer.lookup_transform(
+    #             'j2n6s300_link_base',
+    #             'j2n6s300_end_effector',
+    #             rclpy.time.Time()
+    #         )
+            
+    #         current_rot = Rotation.from_quat([
+    #             transform.transform.rotation.x,
+    #             transform.transform.rotation.y,
+    #             transform.transform.rotation.z,
+    #             transform.transform.rotation.w
+    #         ])
+            
+    #         return current_rot
+            
+    #     except (LookupException, ConnectivityException, ExtrapolationException) as e:
+    #         self.get_logger().error(f'Error getting EE rotation: {e}')
+    #         return None
     
     # ========================================================================
     # SYSTEM COMMANDS
@@ -2177,7 +1824,6 @@ class RobotController(Node):
         self.current_behavior.on_enter()
         
         self.get_logger().warn("Robot stopped. Switch mode to resume operation.")
-
 
 # ============================================================================
 # FINGER CONTROL EXTENSION
@@ -2237,7 +1883,6 @@ class FingerController:
         msg = str_msg()
         msg.data = "grasping" if collision else "none"
         self.controller.haptics_action_pub.publish(msg)
-
 
 # ============================================================================
 # MAIN ENTRY POINT
