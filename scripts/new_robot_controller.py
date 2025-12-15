@@ -250,7 +250,7 @@ class RotationController:
         """
 
         # print("Orientation input:", orientation_input)
-        print("BASIS rotation (deg):", basis_rotation.as_euler('xyz', degrees=True) if basis_rotation else "None")
+        # print("BASIS rotation (deg):", basis_rotation.as_euler('xyz', degrees=True) if basis_rotation else "None")
         if basis_rotation:
             self.basis_buffer = basis_rotation
 
@@ -498,7 +498,40 @@ class ContinuousTeleopBehavior(ControlBehavior):
         
         # Look up the rotation of the input frame relative to base
         # This allows "Up" on joystick to mean "Up" in camera view, etc.
-        basis_rotation = self.controller.get_frame_rotation(input_frame, ROBOT_BASE_FRAME)
+        basis_rotation  = self.controller.get_frame_rotation(input_frame, ROBOT_BASE_FRAME)
+
+        # basis_rotation = self.controller.rotate_to_user()
+
+
+        # TODO: Move to new function
+        # A. Get positions in World/Base Frame
+        pos_camera = self.controller.get_frame_position(input_frame, ROBOT_BASE_FRAME)
+        pos_robot  = self.controller.get_ee_rotation()  # Assuming robot position is at origin of its own frame
+
+        if pos_camera is not None and pos_robot is not None:
+            self.get_logger().info(f"Camera Pos: {pos_camera}, Robot Pos: {pos_robot}")
+
+            # B. Calculate the vector pointing to the head
+            vec_to_target = pos_camera - pos_robot
+
+            # C. Project vector into the current Basis Frame
+            # We multiply by the inverse of the basis to see the vector from the "Basis perspective"
+            vec_local = basis_rotation.inv().apply(vec_to_target)
+
+            # D. Calculate the Pitch angle (Rotation around X) required to center the target
+            # Assuming Y is 'Forward' and Z is 'Up' in your basis logic:
+            angle_x = np.arctan2(vec_local[2], vec_local[1]) 
+
+            # Note: If your Basis "Forward" is Z (common in cameras), use: np.arctan2(vec_local[1], vec_local[2])
+
+            # E. Clamp the angle (±30 degrees)
+            limit_rad = np.deg2rad(30)
+            angle_x_clamped = np.clip(angle_x, -limit_rad, limit_rad)
+
+            # F. Apply the tilt to the basis
+            # We multiply on the right (Intrinsic) to rotate around the Basis's own X-axis
+            tilt_rotation = Rotation.from_euler('x', angle_x_clamped, degrees=False)
+            basis_rotation = basis_rotation * tilt_rotation
 
         # Update the Target Orientation state
         rotation_target = self.controller.rotation_controller.update_target_rotation_from_input(
@@ -1702,6 +1735,20 @@ class RobotController(Node):
                 transform.transform.rotation.y,
                 transform.transform.rotation.z,
                 transform.transform.rotation.w
+            ])
+        except (LookupException, ConnectivityException, ExtrapolationException):
+            return None
+
+    def get_frame_position(self, source_frame: str, target_frame: str) -> Optional[np.ndarray]:
+        """Gets the position of source_frame represented in target_frame."""
+        if not source_frame or source_frame == target_frame:
+            return None # Identity
+        try:
+            transform = self.tf_buffer.lookup_transform(target_frame, source_frame, rclpy.time.Time())
+            return np.array([
+                transform.transform.translation.x,
+                transform.transform.translation.y,
+                transform.transform.translation.z
             ])
         except (LookupException, ConnectivityException, ExtrapolationException):
             return None
