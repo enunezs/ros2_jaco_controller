@@ -223,6 +223,7 @@ class RotationController:
         self.refresh_rate = refresh_rate
 
         self.discretize_enabled = True
+        self.basis_buffer : Optional[Rotation] = None
 
         # Start from no rotation offset
         self.cumulative_rotation : Rotation = Rotation.from_quat([0,0,0,1])
@@ -247,8 +248,15 @@ class RotationController:
             basis_rotation: The rotation of the frame the input is defined in, relative to robot base.
                             If None, assumes input is already in Base frame.
         """
+
+        # print("Orientation input:", orientation_input)
+        print("BASIS rotation (deg):", basis_rotation.as_euler('xyz', degrees=True) if basis_rotation else "None")
+        if basis_rotation:
+            self.basis_buffer = basis_rotation
+
+
         # TODO: Expose speed factor as parameter
-        speed_factor = 0.5 # Rad/s max speed approx
+        speed_factor = 0.3 # Rad/s max speed approx
         # speed_factor = 10.0
         
         # 1. Deadband
@@ -259,53 +267,82 @@ class RotationController:
             user_active = True
             # Raw input vector
             orientation_change_vec = orientation_input * speed_factor * dt
+            # print("Orientation change vec:", orientation_change_vec)
 
         # TODO: Changes: quantisation should only affect the accumulation offset, not the basis
 
-        # 2. Integrate for cummulative rotation (Quaternion Multiplication)
+        # ---------------------------------------------------------
+        # 1. Update Cumulative Rotation (Local Space)
+        # ---------------------------------------------------------
         if user_active:
-            # Create a small rotation from the vector
-            # Magnitude of vector = angle in radians, Direction = axis
-            # rot_delta = Rotation.from_rotvec(orientation_change_vec, degrees=False)
+            # Magnetic gain
+
+            # 1. Get current local angles
+            curr_euler = self.cumulative_rotation.as_euler('xyz', degrees=True)
+            q = self.quantization_degrees
+            
+            # 2. Calculate Detent Gain using a sine wave pattern
+            # logic: sin(0) = 0 (slow at snap), sin(90) = 1 (fast at midpoint)
+            # We map the quantization step 'q' to PI radians.
+            dist_factor = np.abs(np.sin((curr_euler * np.pi) / q))
+            
+            # 3. Define speed limits (Percentage of max speed)
+            min_breakout_speed = 0.2  # 20% speed when stuck in a snap zone
+            max_falling_speed  = 1.5  # 150% speed when 'falling' between zones
+            
+            # Lerp between min and max based on distance from snap point
+            dynamic_gain = min_breakout_speed + (max_falling_speed - min_breakout_speed) * dist_factor
+            
+            # 4. Apply specific gain to specific axis input
+            # This ensures if X is snapped but Y is not, Y still moves fast.
+            modulated_input = orientation_input * dynamic_gain
+            
+            orientation_change_vec = modulated_input * speed_factor * dt
+
+            # INTEGRATE: Apply input to current state
             rot_delta = Rotation.from_euler('xyz', orientation_change_vec, degrees=False)
+            self.cumulative_rotation = rot_delta * self.cumulative_rotation
+        else:
+            # SMOOTH/SNAP: Settle towards nearest grid in LOCAL space
+            
+            # A. Calculate the Snap Target (Local)
+            current_euler = self.cumulative_rotation.as_euler('xyz', degrees=True)
+            q = self.quantization_degrees
+            target_euler_snapped = np.round(current_euler / q) * q
+            target_rot_snapped = Rotation.from_euler('xyz', target_euler_snapped, degrees=True)
 
-            # Apply: New = Delta * Old (Intrinsic) or Old * Delta (Extrinsic)
-            # Usually for "Base Frame" accumulation, we want:
-            self.cumulative_rotation = self.cumulative_rotation * rot_delta
-
-        # 3. Quantization / Snapping
-        # Convert to Euler for grid snapping, then back
-        # Note: We snap in the BASE frame (xyz), which is usually what feels "straight"
-        current_euler = self.cumulative_rotation.as_euler('xyz', degrees=True)
-        q = self.quantization_degrees
-        target_euler_snapped = np.round(current_euler / q) * q
-        target_rot_snapped : Rotation = Rotation.from_euler('xyz', target_euler_snapped, degrees=True)
-        # self.get_logger().info("Snapped Euler (deg):", target_euler_snapped)
-
-        # 4. Apply goal as composition between the quantised offset and the basis
-        # 4. Transform Input to Base Frame
-        # If the user pushes "Forward" (X) in the Camera Frame, and the Camera is rotated 90 deg,
-        # we need to apply that rotation to the vector so the robot moves correctly in Base frame.
-        if basis_rotation is not None and user_active:
-            # Rotate the input vector by the basis rotation
-            target_rot_snapped = basis_rotation * target_rot_snapped
-
-        # 5. Smoothing / Settling
-        if not user_active:
-            # Use SLERP (Spherical Linear Interpolation) for smooth rotation
-            # This fixes the wrap-around bug (359 -> 1 degree)
+            # B. SLERP (Smooth) the Cumulative Rotation towards Snap Target
+            # We smooth the STATE, not the global output
             settle_gain = 6.0
             alpha = 1 - np.exp(-settle_gain * dt)
             
-            # Interpolate between current and snapped
             key_times = [0, 1]
+            # ERROR FIXED HERE: Both rotations are now in Local Space
             key_rots = Rotation.concatenate([self.cumulative_rotation, target_rot_snapped])
             slerp = Slerp(key_times, key_rots)
             
-            # Update current towards target
+            # Update the persistent state
             self.cumulative_rotation = slerp(alpha)
 
-        return self.cumulative_rotation
+        # ---------------------------------------------------------
+        # 2. Apply Basis (Global Space)
+        # ---------------------------------------------------------
+        # Now we apply the basis to the (potentially smoothed) cumulative value.
+        # Since user_active=False implies no new basis input, we rely on the buffer.
+        
+        ROTATION_OFFSET = Rotation.from_euler('xyz', [180, 0, 90], degrees=True)
+        
+        # Determine which basis to use
+        active_basis = basis_rotation if basis_rotation is not None else self.basis_buffer
+
+        if active_basis is not None:
+            # Basis * Offset * Smoothed_Local
+            target_rot_composite = active_basis * ROTATION_OFFSET * self.cumulative_rotation
+        else:
+            # Fallback if no basis ever received
+            target_rot_composite = Rotation.from_quat([0,0,0,1]) * ROTATION_OFFSET * self.cumulative_rotation
+
+        return target_rot_composite
 
     def compute_angular_velocity(self, target_rotation: Rotation, 
                         current_rotation: Rotation, 
@@ -340,63 +377,6 @@ class RotationController:
     def reset(self):
         self.cumulative_rotation = START_ROTATION
 
-
-    def old_update_target_rotation_from_input(self, 
-                                          orientation_input: np.ndarray, 
-                                          dt: float,
-                                          basis_rotation: Optional[Rotation] = None) -> Rotation:
-        # ---------------------------------------
-        # 1. Clamp user angular input
-        # ---------------------------------------
-        MAX_ROTATION_CHANGE = 60.0
-        orientation_change = np.clip(
-            orientation_change,
-            -MAX_ROTATION_CHANGE,
-            MAX_ROTATION_CHANGE
-        )
-
-        # ---------------------------------------
-        # 2. Check whether the user is actually moving
-        # ---------------------------------------
-        input_deadband = 0.01  # small threshold to detect "no movement"
-        user_active = np.linalg.norm(orientation_change) > input_deadband
-
-        # ---------------------------------------
-        # 3. Integrate continuous motion when user is active
-        # ---------------------------------------
-        if user_active:
-            self.cumulative_rotation += orientation_change * dt
-
-        # ---------------------------------------
-        # 4. Compute nearest quantized target (wrap-safe)
-        # ---------------------------------------
-        q = self.quantization_degrees
-        quantized_target = np.round(self.cumulative_rotation / q) * q
-
-        # print in degrees
-        # print("Quantized target rotation (deg):", np.degrees(quantized_target))
-
-        # ---------------------------------------
-        # 5. If user is inactive → smoothly settle to quantized zone
-        # ---------------------------------------
-        if not user_active:
-            # settling gain per second
-            settle_gain = 6.0      # higher → faster snapping (critically damped feel)
-            alpha = 1 - np.exp(-settle_gain * dt)
-            
-            # Smoothly blend toward quantized value
-            error = quantized_target - self.cumulative_rotation
-            # Wrap error to range [-180, 180] (assuming degrees)
-            error = (error + 180) % 360 - 180
-            
-            self.cumulative_rotation += alpha * error
-
-        # ---------------------------------------
-        # 6. Convert to rotation
-        # ---------------------------------------
-        rot_controller = Rotation.from_euler('xyz', self.cumulative_rotation, degrees=True)
-
-        return self.start_rotation * rot_controller
 
     def old_compute_angular_velocity(self, target_rotation: Rotation, 
                         current_rotation: Rotation, 
@@ -534,10 +514,11 @@ class ContinuousTeleopBehavior(ControlBehavior):
         if self.controller.current_pose:
             # We use the CURRENT position (x,y,z) so the rotation ghost 
             # overlaps with the real gripper
+            offset = 0.02
             current_xyz = [
-                self.controller.current_pose.pose.position.x,
-                self.controller.current_pose.pose.position.y,
-                self.controller.current_pose.pose.position.z
+                self.controller.current_pose.pose.position.x + offset,
+                self.controller.current_pose.pose.position.y + offset,
+                self.controller.current_pose.pose.position.z + offset
             ]
 
             # Publish the TF
@@ -563,6 +544,7 @@ class ContinuousTeleopBehavior(ControlBehavior):
          # Construct Message
         msg = PoseVelocityWithFingerVelocity()
         msg.twist_linear_x, msg.twist_linear_y, msg.twist_linear_z = target_linear_vel
+        # TODO: Temp disable
         # msg.twist_angular_x, msg.twist_angular_y, msg.twist_angular_z = target_angular_vel
 
         # TODO Finger!
@@ -586,41 +568,6 @@ class ContinuousTeleopBehavior(ControlBehavior):
         """Send zero velocity when exiting."""
         self.controller.get_logger().info("Exiting continuous teleop mode")
         self.controller.publish_zero_velocity()
-
-# ============================================================================
-# EXTENDED BEHAVIOR IMPLEMENTATIONS (Optional enhancements)
-# ============================================================================
-
-class RotationContinuousBehavior(ContinuousTeleopBehavior):
-    """
-    Specialized behavior for rotation mode with orientation control.
-    Extends continuous teleop with rotation-specific features.
-    """
-    
-    def __init__(self, controller: 'RobotController'):
-        super().__init__(controller, reference_frame="j2n6s300_link_base")
-        # self.get_logger().info("Initialized RotationContinuousBehavior")
-    
-    def process_velocity_command(self, twist: TwistStamped) -> Optional[PoseVelocityWithFingerVelocity]:
-        """
-        Process velocity with focus on rotation control.
-        """
-        if not self.controller.current_pose:
-            return None
-        
-        # Get base processing
-        msg = super().process_velocity_command(twist)
-        
-        if msg is None:
-            return None
-        
-        # Add rotation-specific processing
-        current_rotation = self.controller.get_ee_rotation()
-        if current_rotation is not None:
-            # Could add rotation tracking, constraints, etc.
-            pass
-        
-        return msg
 
 class DiscreteTeleopBehavior(ControlBehavior):
     """
@@ -1225,7 +1172,6 @@ class SystemBehavior(ControlBehavior):
         """Clean exit from system mode."""
         self.controller.get_logger().info("Exiting system control mode")
 
-
 # ============================================================================
 # MAIN ROBOT CONTROLLER
 # ============================================================================
@@ -1267,6 +1213,7 @@ class RobotController(Node):
         # Behavior
         self.behaviors = {
             "translation": ContinuousTeleopBehavior(self),
+            "rotation": ContinuousTeleopBehavior(self),
             "discrete": DiscreteTeleopBehavior(self),
             # Add system, etc.
         }
