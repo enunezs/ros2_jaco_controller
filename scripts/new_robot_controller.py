@@ -223,7 +223,7 @@ class RotationController:
         self.refresh_rate = refresh_rate
 
         self.discretize_enabled = True
-        self.basis_buffer : Optional[Rotation] = None
+        self.rotation_reference_frame_buffer : Optional[Rotation] = None
 
         # Start from no rotation offset
         self.cumulative_rotation : Rotation = Rotation.from_quat([0,0,0,1])
@@ -234,7 +234,7 @@ class RotationController:
     def update_target_rotation_from_input(self, 
                                           orientation_input: np.ndarray, 
                                           dt: float,
-                                          basis_rotation: Optional[Rotation] = None) -> Rotation:
+                                          rotation_reference_frame: Optional[Rotation] = None) -> Rotation:
         """
         Bi-stable rotation update:
         - When user is moving -> follow velocity input
@@ -245,14 +245,13 @@ class RotationController:
         Args:
             orientation_input: [rx, ry, rz] velocity request from joystick (approx -1 to 1)
             dt: Time delta
-            basis_rotation: The rotation of the frame the input is defined in, relative to robot base.
+            rotation_reference_frame: The rotation of the frame the input is defined in, relative to robot base.
                             If None, assumes input is already in Base frame.
         """
 
         # print("Orientation input:", orientation_input)
-        # print("BASIS rotation (deg):", basis_rotation.as_euler('xyz', degrees=True) if basis_rotation else "None")
-        if basis_rotation:
-            self.basis_buffer = basis_rotation
+        if rotation_reference_frame:
+            self.rotation_reference_frame_buffer = rotation_reference_frame
 
 
         # TODO: Expose speed factor as parameter
@@ -269,7 +268,7 @@ class RotationController:
             orientation_change_vec = orientation_input * speed_factor * dt
             # print("Orientation change vec:", orientation_change_vec)
 
-        # TODO: Changes: quantisation should only affect the accumulation offset, not the basis
+        # TODO: Changes: quantisation should only affect the accumulation offset, not the reference frame
 
         # ---------------------------------------------------------
         # 1. Update Cumulative Rotation (Local Space)
@@ -325,22 +324,21 @@ class RotationController:
             self.cumulative_rotation = slerp(alpha)
 
         # ---------------------------------------------------------
-        # 2. Apply Basis (Global Space)
+        # 2. Apply Reference Frame (Global Space)
         # ---------------------------------------------------------
-        # Now we apply the basis to the (potentially smoothed) cumulative value.
-        # Since user_active=False implies no new basis input, we rely on the buffer.
+        # Now we apply the reference frame to the (potentially smoothed) cumulative value.
+        # Since user_active=False implies no new reference frame input, we rely on the buffer.
         
-        ROTATION_OFFSET = Rotation.from_euler('xyz', [0, 0, 0], degrees=True)
         
-        # Determine which basis to use
-        active_basis = basis_rotation if basis_rotation is not None else self.basis_buffer
+        # Determine which reference frame to use
+        active_reference_frame = rotation_reference_frame if rotation_reference_frame is not None else self.rotation_reference_frame_buffer
 
-        if active_basis is not None:
-            # Basis * Offset * Smoothed_Local
-            target_rot_composite = active_basis * ROTATION_OFFSET * self.cumulative_rotation
+        if active_reference_frame is not None:
+            # Reference Frame * Offset * Smoothed_Local
+            target_rot_composite = active_reference_frame  * self.cumulative_rotation
         else:
-            # Fallback if no basis ever received
-            target_rot_composite = Rotation.from_quat([0,0,0,1]) * ROTATION_OFFSET * self.cumulative_rotation
+            # Fallback if no reference frame ever received
+            target_rot_composite = Rotation.from_quat([0,0,0,1]) * self.cumulative_rotation
 
         return target_rot_composite
 
@@ -490,24 +488,60 @@ class ContinuousTeleopBehavior(ControlBehavior):
              pid_out = self.controller.pid_linear.control_update(target_linear_vel, self.controller.current_vel[0:3])
              target_linear_vel = target_linear_vel #+ pid_out
 
+
         ##################################
         ### 2. Handle Rotation Control ###
         ##################################
 
-        target_angular_input = np.array([twist.twist.angular.x, twist.twist.angular.y, twist.twist.angular.z])
-        
-        # Look up the rotation of the input frame relative to base
-        # This allows "Up" on joystick to mean "Up" in camera view, etc.
-        basis_rotation  = self.controller.get_frame_rotation(input_frame, ROBOT_BASE_FRAME)
-        # basis_rotation = self.controller.rotate_to_user()
-        # basis_rotation = self.controller.get_ee_rotation()
+        # 2A. We use the rotation reference frame as the baseline for starting. Rotations happen locally, but snaps happen relative to this.
+        # print(input_frame)
+        # if input_frame is None:
+            # input_frame = ROBOT_BASE_FRAME
+        rotation_reference_frame  = self.controller.get_frame_rotation(input_frame, ROBOT_BASE_FRAME)
+        # rotation_reference_frame = self.controller.get_ee_rotation()
+
+        # This allows "Up" on joystick to mean "Up" in camera view
+        print(f"Rotation reference frame is: {rotation_reference_frame}")
+
+        if rotation_reference_frame is None:
+            rotation_reference_frame = Rotation.from_quat([0,0,0,1])
+
+        ROTATION_OFFSET = Rotation.from_euler('xyz', [0, 180, 0], degrees=True)
+
+        rotation_reference_frame = rotation_reference_frame * ROTATION_OFFSET
+
+        # =========================================================
+        # DEBUG: Visualize the Rotation Reference Frame
+        # =========================================================
+        if self.controller.current_pose and rotation_reference_frame is not None:
+            # 1. Create a visual offset so it doesn't clip inside the robot
+            #    Let's put it 10cm above the current end effector
+            debug_xyz = [
+                self.controller.current_pose.pose.position.x+ 0.005,
+                self.controller.current_pose.pose.position.y+ 0.005,
+                self.controller.current_pose.pose.position.z + 0.005
+            ]
+
+            # 2. Publish the TF
+            #    Name the frame "debug_rotation_reference_frame"
+            self.controller.publish_rotation_target(
+                rotation=rotation_reference_frame,
+                frame_id=ROBOT_BASE_FRAME,
+                child_frame_id="coarse_target", 
+                visual_offset=debug_xyz
+            )
+        # =========================================================
 
 
+        # 2B. User Compensation (Optional)
         # TODO: Forcing for now
         input_frame = "camera_optical_frame"
         aruco_frame = "aruco_78"
 
-        if input_frame == "camera_optical_frame":
+        user_compensation = True
+        user_tracking_rot : Rotation =  Rotation.from_quat([0,0,0,1])
+
+        if user_compensation:
             pos_camera = self.controller.get_frame_position(input_frame, ROBOT_BASE_FRAME)
             pos_ee = self.controller.get_frame_position(aruco_frame, ROBOT_BASE_FRAME)
             rot_ee = self.controller.get_frame_rotation(aruco_frame, ROBOT_BASE_FRAME)
@@ -526,28 +560,34 @@ class ContinuousTeleopBehavior(ControlBehavior):
                 # We want the Local Y-axis (0,1,0) to point towards the vector.
                 # So we project the vector onto the Y-Z plane and find the angle.
                 # arctan2(opposite, adjacent) -> arctan2(z, y)
-                angle_x = np.arctan2(vec_local[2], vec_local[1])
+                angle_x = np.arctan2(-vec_local[1], vec_local[2])
 
                 # --- Rotation 2: Around Z (Yaw/Pan) ---
                 # After X-rotation, the vector length in the YZ plane is hypot(y,z).
                 # We compare X against that length.
                 # Note: We use -x because positive Z-rotation moves Y towards -X
-                yz_magnitude = np.hypot(vec_local[1], vec_local[2])
-                angle_z = -np.arctan2(-vec_local[0], yz_magnitude)
+                yz_magnitude = np.hypot(-vec_local[1], vec_local[2])
+                # angle_z = 0
+                angle_z = -np.arctan2(vec_local[0], yz_magnitude)
+
+                # if angles greater than 30, skip 
+                # if abs(angle_x) > np.radians(30) or abs(angle_z) > np.radians(30):
+                #     angle_x = 0
+                #     angle_z = 0
+
                 # angle_z = 0 
                 # D. Create the single-axis correction rotation
                 user_tracking_rot : Rotation = Rotation.from_euler('xz', [angle_x, angle_z], degrees=False)
 
                 # E. Apply correction to current orientation
                 # New = Current * Correction (Intrinsic rotation)
-                basis_rotation = rot_ee * user_tracking_rot
-            else:
-                user_tracking_rot : Rotation =  Rotation.from_quat([0,0,0,1])
+
+        compensated_rotation_reference_frame = rotation_reference_frame * user_tracking_rot
 
         # =========================================================
-        # DEBUG: Visualize the Basis Frame
+        # DEBUG: Visualize the Rotation Reference Frame
         # =========================================================
-        if self.controller.current_pose and basis_rotation is not None:
+        if self.controller.current_pose and rotation_reference_frame is not None:
             # 1. Create a visual offset so it doesn't clip inside the robot
             #    Let's put it 10cm above the current end effector
             debug_xyz = [
@@ -557,24 +597,25 @@ class ContinuousTeleopBehavior(ControlBehavior):
             ]
 
             # 2. Publish the TF
-            #    Name the frame "debug_basis_frame"
+            #    Name the frame "debug_rotation_reference_frame"
             self.controller.publish_rotation_target(
-                rotation=basis_rotation,
+                rotation=compensated_rotation_reference_frame,
                 frame_id=ROBOT_BASE_FRAME,
-                child_frame_id="debug_basis_frame", 
+                child_frame_id="post_user_compensation", 
                 visual_offset=debug_xyz
             )
         # =========================================================
 
+        # 2C. Apply user inputs, quantize, and apply offsets
         # Update the Target Orientation state
+        target_angular_input = np.array([twist.twist.angular.x, twist.twist.angular.y, twist.twist.angular.z])
+
         rotation_target = self.controller.rotation_controller.update_target_rotation_from_input(
             target_angular_input,
             dt=1.0/REFRESH_RATE,
-            basis_rotation=basis_rotation
+            rotation_reference_frame=compensated_rotation_reference_frame
         )
 
-
-        
         # Visualize Target
         if self.controller.current_pose:
             # Offset to avoid total overlap
@@ -599,7 +640,7 @@ class ContinuousTeleopBehavior(ControlBehavior):
             target_angular_vel = self.controller.rotation_controller.compute_angular_velocity(
                 rotation_target,
                 current_ee_rot,
-                pid_controller=None # or TODO self.controller.pid_angular
+                pid_controller= self.controller.pid_angular
             )
         else:
             target_angular_vel = np.zeros(3)
@@ -607,9 +648,9 @@ class ContinuousTeleopBehavior(ControlBehavior):
 
          # Construct Message
         msg = PoseVelocityWithFingerVelocity()
-        msg.twist_linear_x, msg.twist_linear_y, msg.twist_linear_z = target_linear_vel
+        # msg.twist_linear_x, msg.twist_linear_y, msg.twist_linear_z = target_linear_vel
         # TODO: Temp disable
-        # msg.twist_angular_x, msg.twist_angular_y, msg.twist_angular_z = target_angular_vel
+        msg.twist_angular_x, msg.twist_angular_y, msg.twist_angular_z = target_angular_vel
 
         # TODO Finger!
         # msg.finger_velocity1, msg.finger_velocity2, msg.finger_velocity3 = [0.0, 0.0, 0.0]
@@ -1250,7 +1291,7 @@ class RobotController(Node):
         
         # Components
         self.pid_linear = PIDController(kp=0.8, ki=0.1, length=3)
-        self.pid_angular = PIDController(kp=2.0, ki=0.5, length=3) # PID for angular velocity
+        self.pid_angular = PIDController(kp=0.95, ki=0.025, length=3) # PID for angular velocity
         self.vel_filter = RollingAverageFilter(window_size=5)
         self.vel_integrator = VelocityIntegrator(self.max_linear_velocity)
         
