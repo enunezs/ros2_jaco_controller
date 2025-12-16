@@ -330,7 +330,7 @@ class RotationController:
         # Now we apply the basis to the (potentially smoothed) cumulative value.
         # Since user_active=False implies no new basis input, we rely on the buffer.
         
-        ROTATION_OFFSET = Rotation.from_euler('xyz', [180, 0, 90], degrees=True)
+        ROTATION_OFFSET = Rotation.from_euler('xyz', [0, 0, 0], degrees=True)
         
         # Determine which basis to use
         active_basis = basis_rotation if basis_rotation is not None else self.basis_buffer
@@ -499,39 +499,72 @@ class ContinuousTeleopBehavior(ControlBehavior):
         # Look up the rotation of the input frame relative to base
         # This allows "Up" on joystick to mean "Up" in camera view, etc.
         basis_rotation  = self.controller.get_frame_rotation(input_frame, ROBOT_BASE_FRAME)
-
         # basis_rotation = self.controller.rotate_to_user()
+        # basis_rotation = self.controller.get_ee_rotation()
 
 
-        # TODO: Move to new function
-        # A. Get positions in World/Base Frame
-        pos_camera = self.controller.get_frame_position(input_frame, ROBOT_BASE_FRAME)
-        pos_robot  = self.controller.get_ee_rotation()  # Assuming robot position is at origin of its own frame
+        # TODO: Forcing for now
+        input_frame = "camera_optical_frame"
+        aruco_frame = "aruco_78"
 
-        if pos_camera is not None and pos_robot is not None:
-            self.get_logger().info(f"Camera Pos: {pos_camera}, Robot Pos: {pos_robot}")
+        if input_frame == "camera_optical_frame":
+            pos_camera = self.controller.get_frame_position(input_frame, ROBOT_BASE_FRAME)
+            pos_ee = self.controller.get_frame_position(aruco_frame, ROBOT_BASE_FRAME)
+            rot_ee = self.controller.get_frame_rotation(aruco_frame, ROBOT_BASE_FRAME)
 
-            # B. Calculate the vector pointing to the head
-            vec_to_target = pos_camera - pos_robot
+            if pos_camera is not None and pos_ee is not None and rot_ee is not None:
+                # A. Vector from End Effector to Camera (in World/Base Frame)
+                vec_to_target = pos_camera - pos_ee
 
-            # C. Project vector into the current Basis Frame
-            # We multiply by the inverse of the basis to see the vector from the "Basis perspective"
-            vec_local = basis_rotation.inv().apply(vec_to_target)
+                # B. Transform Vector to End Effector's LOCAL Space
+                # This is the crucial step. It tells us where the camera is 
+                # from the perspective of the gripper.
+                vec_local = rot_ee.inv().apply(vec_to_target)
 
-            # D. Calculate the Pitch angle (Rotation around X) required to center the target
-            # Assuming Y is 'Forward' and Z is 'Up' in your basis logic:
-            angle_x = np.arctan2(vec_local[2], vec_local[1]) 
+                # C. Calculate Angle around X-Axis
+                # --- Rotation 1: Around X (Pitch/Tilt) ---
+                # We want the Local Y-axis (0,1,0) to point towards the vector.
+                # So we project the vector onto the Y-Z plane and find the angle.
+                # arctan2(opposite, adjacent) -> arctan2(z, y)
+                angle_x = np.arctan2(vec_local[2], vec_local[1])
 
-            # Note: If your Basis "Forward" is Z (common in cameras), use: np.arctan2(vec_local[1], vec_local[2])
+                # --- Rotation 2: Around Z (Yaw/Pan) ---
+                # After X-rotation, the vector length in the YZ plane is hypot(y,z).
+                # We compare X against that length.
+                # Note: We use -x because positive Z-rotation moves Y towards -X
+                yz_magnitude = np.hypot(vec_local[1], vec_local[2])
+                angle_z = -np.arctan2(-vec_local[0], yz_magnitude)
+                # angle_z = 0 
+                # D. Create the single-axis correction rotation
+                user_tracking_rot : Rotation = Rotation.from_euler('xz', [angle_x, angle_z], degrees=False)
 
-            # E. Clamp the angle (±30 degrees)
-            limit_rad = np.deg2rad(30)
-            angle_x_clamped = np.clip(angle_x, -limit_rad, limit_rad)
+                # E. Apply correction to current orientation
+                # New = Current * Correction (Intrinsic rotation)
+                basis_rotation = rot_ee * user_tracking_rot
+            else:
+                user_tracking_rot : Rotation =  Rotation.from_quat([0,0,0,1])
 
-            # F. Apply the tilt to the basis
-            # We multiply on the right (Intrinsic) to rotate around the Basis's own X-axis
-            tilt_rotation = Rotation.from_euler('x', angle_x_clamped, degrees=False)
-            basis_rotation = basis_rotation * tilt_rotation
+        # =========================================================
+        # DEBUG: Visualize the Basis Frame
+        # =========================================================
+        if self.controller.current_pose and basis_rotation is not None:
+            # 1. Create a visual offset so it doesn't clip inside the robot
+            #    Let's put it 10cm above the current end effector
+            debug_xyz = [
+                self.controller.current_pose.pose.position.x+ 0.01,
+                self.controller.current_pose.pose.position.y+ 0.01,
+                self.controller.current_pose.pose.position.z + 0.01
+            ]
+
+            # 2. Publish the TF
+            #    Name the frame "debug_basis_frame"
+            self.controller.publish_rotation_target(
+                rotation=basis_rotation,
+                frame_id=ROBOT_BASE_FRAME,
+                child_frame_id="debug_basis_frame", 
+                visual_offset=debug_xyz
+            )
+        # =========================================================
 
         # Update the Target Orientation state
         rotation_target = self.controller.rotation_controller.update_target_rotation_from_input(
@@ -539,14 +572,12 @@ class ContinuousTeleopBehavior(ControlBehavior):
             dt=1.0/REFRESH_RATE,
             basis_rotation=basis_rotation
         )
-        
 
-        # =========================================================
-        # NEW CODE: Visualize Target Rotation in RViz
-        # =========================================================
+
+        
+        # Visualize Target
         if self.controller.current_pose:
-            # We use the CURRENT position (x,y,z) so the rotation ghost 
-            # overlaps with the real gripper
+            # Offset to avoid total overlap
             offset = 0.02
             current_xyz = [
                 self.controller.current_pose.pose.position.x + offset,
@@ -561,19 +592,19 @@ class ContinuousTeleopBehavior(ControlBehavior):
                 child_frame_id="target_orientation_ghost", 
                 visual_offset=current_xyz
             )
-        # =========================================================
 
-        # Compute Velocity to reach that target
+        # Compute Base Angular Velocity from Rotation Controller
         current_ee_rot = self.controller.get_ee_rotation()
         if current_ee_rot:
             target_angular_vel = self.controller.rotation_controller.compute_angular_velocity(
                 rotation_target,
                 current_ee_rot,
-                pid_controller=None # or self.controller.pid_angular
+                pid_controller=None # or TODO self.controller.pid_angular
             )
         else:
             target_angular_vel = np.zeros(3)
- 
+
+
          # Construct Message
         msg = PoseVelocityWithFingerVelocity()
         msg.twist_linear_x, msg.twist_linear_y, msg.twist_linear_z = target_linear_vel
