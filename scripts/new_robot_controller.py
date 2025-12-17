@@ -546,7 +546,15 @@ class ContinuousTeleopBehavior(ControlBehavior):
             pos_ee = self.controller.get_frame_position(aruco_frame, ROBOT_BASE_FRAME)
             rot_ee = self.controller.get_frame_rotation(aruco_frame, ROBOT_BASE_FRAME)
 
-            if pos_camera is not None and pos_ee is not None and rot_ee is not None:
+            # Check, if the position of the camera frame is close to zero, it means it doesnt exist
+            camera_at_zero = np.linalg.norm(pos_camera) < 0.01
+
+
+            if (pos_camera is not None) and \
+                    (pos_ee is not None)  and \
+                    (rot_ee is not None) and \
+                    (not camera_at_zero):
+                print("Applying user compensation")
                 # A. Vector from End Effector to Camera (in World/Base Frame)
                 vec_to_target = pos_camera - pos_ee
 
