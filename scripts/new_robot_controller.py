@@ -107,7 +107,11 @@ class PIDController:
             self.integral_error = np.clip(self.integral_error, -1.0, 1.0)
         
         # Derivative term
-        self.derivative_error = (current_error - self.prev_error) * self.refresh_rate
+        dx = (current_vel - self.prev_vel) * self.refresh_rate
+        self.derivative_error = -dx # Sign change
+        self.prev_vel = current_vel
+        
+        # Better implementation: Derivative on PV (Measurement)
         self.prev_error = current_error
 
         compensation = self.kp * current_error + self.ki * self.integral_error + self.kd * self.derivative_error
@@ -318,6 +322,7 @@ class RotationController:
             key_times = [0, 1]
             # ERROR FIXED HERE: Both rotations are now in Local Space
             key_rots = Rotation.concatenate([self.cumulative_rotation, target_rot_snapped])
+
             slerp = Slerp(key_times, key_rots)
             
             # Update the persistent state
@@ -486,7 +491,7 @@ class ContinuousTeleopBehavior(ControlBehavior):
         if self.controller.current_vel is not None:
              # Basic Feedforward + PID correction
              pid_out = self.controller.pid_linear.control_update(target_linear_vel, self.controller.current_vel[0:3])
-             target_linear_vel = target_linear_vel #+ pid_out
+             target_linear_vel = target_linear_vel + pid_out
 
 
         ##################################
@@ -501,7 +506,7 @@ class ContinuousTeleopBehavior(ControlBehavior):
         # rotation_reference_frame = self.controller.get_ee_rotation()
 
         # This allows "Up" on joystick to mean "Up" in camera view
-        print(f"Rotation reference frame is: {rotation_reference_frame}")
+        # print(f"Rotation reference frame is: {rotation_reference_frame}")
 
         if rotation_reference_frame is None:
             rotation_reference_frame = Rotation.from_quat([0,0,0,1])
@@ -547,13 +552,13 @@ class ContinuousTeleopBehavior(ControlBehavior):
             rot_ee = self.controller.get_frame_rotation(aruco_frame, ROBOT_BASE_FRAME)
 
             # Check, if the position of the camera frame is close to zero, it means it doesnt exist
-            camera_at_zero = np.linalg.norm(pos_camera) < 0.01
 
 
             if (pos_camera is not None) and \
                     (pos_ee is not None)  and \
                     (rot_ee is not None) and \
-                    (not camera_at_zero):
+                    (not np.linalg.norm(pos_camera) < 0.01):
+                
                 print("Applying user compensation")
                 # A. Vector from End Effector to Camera (in World/Base Frame)
                 vec_to_target = pos_camera - pos_ee
@@ -671,7 +676,8 @@ class ContinuousTeleopBehavior(ControlBehavior):
         )
         return False
     
-    def on_enter(self):
+    def on_enter(self):key_rots = Rotation.concatenate([self.cumulative_rotation, target_rot_snapped])
+
         """Reset integrators when entering continuous mode."""
         self.controller.get_logger().info(f"Entered continuous teleop mode")
         self.controller.pid_linear.reset()
@@ -1017,7 +1023,8 @@ class DiscreteTeleopBehavior(ControlBehavior):
         position_reached = position_distance < self.position_threshold
         
         # ===== Orientation Check =====
-        current_rot = self.controller.get_ee_rotation()
+        current_rot = self.controller.get_ee_rotation() 
+        # todo: SHOULD USE INSTEAD PRIOR TO COMP -> COARSE TARGET?
         if current_rot is None:
             # If we can't get rotation, only check position
             return position_reached
@@ -1044,7 +1051,8 @@ class DiscreteTeleopBehavior(ControlBehavior):
         #     f"orient: {angle_error_deg:.1f}deg "
         #     f"(thresh: {self.orientation_threshold_deg:.1f}deg)"
         # )
-        
+        orientation_reached = True
+
         return position_reached and orientation_reached
     
     def _check_timeout(self) -> bool:
@@ -1131,7 +1139,7 @@ class DiscreteTeleopBehavior(ControlBehavior):
                 self.controller.current_vel[0:3]     # must contain vx,vy,vz
             )
 
-            target_velocity = pid_correction       # PID output drives robot
+            target_velocity = target_velocity + pid_correction
 
         else:
             target_velocity = np.zeros(3)
@@ -1298,7 +1306,7 @@ class RobotController(Node):
         self.quantization_degrees = self.declare_parameter("quantisation_degrees", 45.0).value
         
         # Components
-        self.pid_linear = PIDController(kp=0.8, ki=0.1, length=3)
+        self.pid_linear = PIDController(kp=0.8, ki=0.001, length=3)
         self.pid_angular = PIDController(kp=0.95, ki=0.025, length=3) # PID for angular velocity
         self.vel_filter = RollingAverageFilter(window_size=5)
         self.vel_integrator = VelocityIntegrator(self.max_linear_velocity)
@@ -1836,33 +1844,6 @@ class RobotController(Node):
     def get_ee_rotation(self) -> Optional[Rotation]:
         return self.get_frame_rotation('j2n6s300_end_effector', ROBOT_BASE_FRAME)
 
-    # def get_ee_rotation(self) -> Optional[Rotation]:
-    #     """
-    #     Get current end-effector rotation.
-        
-    #     Returns:
-    #         Current rotation as Rotation object, or None if unavailable
-    #     """
-    #     try:
-    #         transform = self.tf_buffer.lookup_transform(
-    #             'j2n6s300_link_base',
-    #             'j2n6s300_end_effector',
-    #             rclpy.time.Time()
-    #         )
-            
-    #         current_rot = Rotation.from_quat([
-    #             transform.transform.rotation.x,
-    #             transform.transform.rotation.y,
-    #             transform.transform.rotation.z,
-    #             transform.transform.rotation.w
-    #         ])
-            
-    #         return current_rot
-            
-    #     except (LookupException, ConnectivityException, ExtrapolationException) as e:
-    #         self.get_logger().error(f'Error getting EE rotation: {e}')
-    #         return None
-    
     # ========================================================================
     # SYSTEM COMMANDS
     # ========================================================================
