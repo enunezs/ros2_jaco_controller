@@ -39,7 +39,7 @@ def generate_launch_description():
     jaco_controller_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             [
-                os.path.join(get_package_share_directory("ros2_jaco_controller"), "launch"),
+                os.path.join(get_package_share_directory("jacoarm-ros2"), "launch"),
                 "/controller.launch.py",
             ]
         )

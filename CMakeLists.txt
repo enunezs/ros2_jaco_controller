@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.5)
-project(ros2_jaco_controller)
+project(jacoarm-ros2)
 
 # Default to C99
 if(NOT CMAKE_C_STANDARD)
@@ -37,8 +37,9 @@ install(DIRECTORY
 ament_python_install_package(scripts)
 
 install(PROGRAMS
-  scripts/all_purpose_controller.py
+  scripts/new_robot_controller.py
   scripts/go_to_pose.py
+  scripts/mode_manager.py
   scripts/mode_manager.py
   DESTINATION lib/${PROJECT_NAME}
 )

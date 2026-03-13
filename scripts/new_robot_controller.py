@@ -1436,7 +1436,7 @@ class RobotController(Node):
         
         # NEW: Discrete waypoint execution parameters
         self.discrete_motion_speed = self.declare_parameter(
-            "discrete_motion_speed", 0.70).value  # 150% of max velocity
+            "discrete_motion_speed", 0.50).value  # 150% of max velocity
         
         self.waypoint_position_threshold = self.declare_parameter(
             "waypoint_position_threshold", 0.005).value  # 5mm

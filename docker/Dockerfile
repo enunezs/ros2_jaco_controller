@@ -100,12 +100,12 @@ RUN apt-get update && apt-get install -y \
 	ros-$ROS_DISTRO-joy 
 
 #### SET ENVIRONMENT
-# colcon build --packages-select ros2_jaco_controller
+# colcon build --packages-select jacoarm-ros2
 
 RUN echo 'alias python="python3"' >> $HOME/.bashrc
-RUN echo 'source /opt/ros/humble/setup.sh && colcon build' >> $HOME/.bashrc
+# RUN echo 'source /opt/ros/humble/setup.sh && colcon build' >> $HOME/.bashrc
+RUN echo 'source /opt/ros/$ROS_DISTRO/setup.sh && colcon build --packages-select jacoarm-ros2' >> $HOME/.bashrc
 RUN echo 'source install/setup.bash' >> $HOME/.bashrc
-#RUN echo 'source /opt/ros/$ROS_DISTRO/setup.sh && colcon build --packages-select ros2_jaco_controller' >> $HOME/.bashrc
 
 # colcon build --symlink-install --packages-select kinova_msgs kinova_bringup kinova_driver kinova_description kinova_demo
 

@@ -4,19 +4,23 @@
     normalise_cartesian_speed: False
     relative_cartesian_movement_enabled: False
     max_linear_velocity:
-      - 0.2
-      - 0.12
-      - 0.16
+      - 0.1
+      - 0.06
+      - 0.08
     max_angular_velocity: 5.0
     max_finger_velocity: 2000.0
     discretise_rotation: True
-    quantisation_degrees: 30.0
+    quantisation_degrees: 45.0
     pid_enabled: True
-    kp_linear: 0.8
+    kp_linear: 0.7
     ki_linear: 0.1
     kd_linear: 0.00
     kp_angular: 2.0
     ki_angular: 2.0
-    kd_angular: 5.00
+    kd_angular: 5.0
+    discrete_motion_speed: 0.50
+    waypoint_position_threshold: 0.005
+    waypoint_orientation_threshold_deg: 5.0
+    waypoint_timeout_sec: 20.0
     camera_rotation_compensation: False
     rotation_assistance: 2.0
