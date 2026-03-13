@@ -16,6 +16,8 @@ from rclpy.time import Time
 from kinova_msgs.msg import PoseVelocity, PoseVelocityWithFingerVelocity, FingerPosition
 from geometry_msgs.msg import TransformStamped, PoseStamped, WrenchStamped, Point, TwistStamped
 from std_msgs.msg import String as str_msg
+from std_msgs.msg import Float64MultiArray
+
 # from std_msgs.msg import Int32 as int_msg
 from nav_msgs.msg import Path
 
@@ -70,6 +72,7 @@ class PIDController:
         self.integral_error = np.zeros(self.length)
         self.derivative_error = np.zeros(self.length)
         self.anti_windup = anti_windup
+        self.prev_vel = 0.0
 
     def update_parameters(self, kp: Optional[float] = None, ki: Optional[float] = None, 
                          kd: Optional[float] = None, refresh_rate: Optional[float] = None):
@@ -537,63 +540,63 @@ class ContinuousTeleopBehavior(ControlBehavior):
             )
         # =========================================================
 
-
         # 2B. User Compensation (Optional)
         # TODO: Forcing for now
         input_frame = "camera_optical_frame"
-        aruco_frame = "aruco_78"
+        aruco_frame = "aruco_91"
 
         user_compensation = True
-        user_tracking_rot : Rotation =  Rotation.from_quat([0,0,0,1])
 
-        if user_compensation:
-            pos_camera = self.controller.get_frame_position(input_frame, ROBOT_BASE_FRAME)
-            pos_ee = self.controller.get_frame_position(aruco_frame, ROBOT_BASE_FRAME)
-            rot_ee = self.controller.get_frame_rotation(aruco_frame, ROBOT_BASE_FRAME)
+        user_tracking_rot = self.controller.get_tracking_compensation()
 
-            # Check, if the position of the camera frame is close to zero, it means it doesnt exist
+        # user_tracking_rot : Rotation =  Rotation.from_quat([0,0,0,1])
+        # if user_compensation:
+        #     pos_camera = self.controller.get_frame_position(input_frame, ROBOT_BASE_FRAME)
+        #     pos_ee = self.controller.get_frame_position(aruco_frame, ROBOT_BASE_FRAME)
+        #     rot_ee = self.controller.get_frame_rotation(aruco_frame, ROBOT_BASE_FRAME)
+
+        #     # Check, if the position of the camera frame is close to zero, it means it doesnt exist
 
 
-            if (pos_camera is not None) and \
-                    (pos_ee is not None)  and \
-                    (rot_ee is not None) and \
-                    (not np.linalg.norm(pos_camera) < 0.01):
+        #     if (pos_camera is not None) and \
+        #             (pos_ee is not None)  and \
+        #             (rot_ee is not None) and \
+        #             (not np.linalg.norm(pos_camera) < 0.01):
                 
-                print("Applying user compensation")
-                # A. Vector from End Effector to Camera (in World/Base Frame)
-                vec_to_target = pos_camera - pos_ee
+        #         # A. Vector from End Effector to Camera (in World/Base Frame)
+        #         vec_to_target = pos_camera - pos_ee
 
-                # B. Transform Vector to End Effector's LOCAL Space
-                # This is the crucial step. It tells us where the camera is 
-                # from the perspective of the gripper.
-                vec_local = rot_ee.inv().apply(vec_to_target)
+        #         # B. Transform Vector to End Effector's LOCAL Space
+        #         # This is the crucial step. It tells us where the camera is 
+        #         # from the perspective of the gripper.
+        #         vec_local = rot_ee.inv().apply(vec_to_target)
 
-                # C. Calculate Angle around X-Axis
-                # --- Rotation 1: Around X (Pitch/Tilt) ---
-                # We want the Local Y-axis (0,1,0) to point towards the vector.
-                # So we project the vector onto the Y-Z plane and find the angle.
-                # arctan2(opposite, adjacent) -> arctan2(z, y)
-                angle_x = np.arctan2(-vec_local[1], vec_local[2])
+        #         # C. Calculate Angle around X-Axis
+        #         # --- Rotation 1: Around X (Pitch/Tilt) ---
+        #         # We want the Local Y-axis (0,1,0) to point towards the vector.
+        #         # So we project the vector onto the Y-Z plane and find the angle.
+        #         # arctan2(opposite, adjacent) -> arctan2(z, y)
+        #         angle_x = np.arctan2(-vec_local[1], vec_local[2])
 
-                # --- Rotation 2: Around Z (Yaw/Pan) ---
-                # After X-rotation, the vector length in the YZ plane is hypot(y,z).
-                # We compare X against that length.
-                # Note: We use -x because positive Z-rotation moves Y towards -X
-                yz_magnitude = np.hypot(-vec_local[1], vec_local[2])
-                # angle_z = 0
-                angle_z = -np.arctan2(vec_local[0], yz_magnitude)
+        #         # --- Rotation 2: Around Z (Yaw/Pan) ---
+        #         # After X-rotation, the vector length in the YZ plane is hypot(y,z).
+        #         # We compare X against that length.
+        #         # Note: We use -x because positive Z-rotation moves Y towards -X
+        #         yz_magnitude = np.hypot(-vec_local[1], vec_local[2])
+        #         # angle_z = 0
+        #         angle_z = -np.arctan2(vec_local[0], yz_magnitude)
 
-                # if angles greater than 30, skip 
-                # if abs(angle_x) > np.radians(30) or abs(angle_z) > np.radians(30):
-                #     angle_x = 0
-                #     angle_z = 0
+        #         # if angles greater than 30, skip 
+        #         # if abs(angle_x) > np.radians(30) or abs(angle_z) > np.radians(30):
+        #         #     angle_x = 0
+        #         #     angle_z = 0
 
-                # angle_z = 0 
-                # D. Create the single-axis correction rotation
-                user_tracking_rot : Rotation = Rotation.from_euler('xz', [angle_x, angle_z], degrees=False)
+        #         # angle_z = 0 
+        #         # D. Create the single-axis correction rotation
+        #         user_tracking_rot : Rotation = Rotation.from_euler('xz', [angle_x, angle_z], degrees=False)
 
-                # E. Apply correction to current orientation
-                # New = Current * Correction (Intrinsic rotation)
+        #         # E. Apply correction to current orientation
+        #         # New = Current * Correction (Intrinsic rotation)
 
         compensated_rotation_reference_frame = rotation_reference_frame * user_tracking_rot
 
@@ -661,7 +664,7 @@ class ContinuousTeleopBehavior(ControlBehavior):
 
          # Construct Message
         msg = PoseVelocityWithFingerVelocity()
-        # msg.twist_linear_x, msg.twist_linear_y, msg.twist_linear_z = target_linear_vel
+        msg.twist_linear_x, msg.twist_linear_y, msg.twist_linear_z = target_linear_vel
         # TODO: Temp disable
         msg.twist_angular_x, msg.twist_angular_y, msg.twist_angular_z = target_angular_vel
 
@@ -676,7 +679,7 @@ class ContinuousTeleopBehavior(ControlBehavior):
         )
         return False
     
-    def on_enter(self):key_rots = Rotation.concatenate([self.cumulative_rotation, target_rot_snapped])
+    def on_enter(self):
 
         """Reset integrators when entering continuous mode."""
         self.controller.get_logger().info(f"Entered continuous teleop mode")
@@ -716,6 +719,8 @@ class DiscreteTeleopBehavior(ControlBehavior):
 
         # Waypoint queue tracking
         self.waypoint_queue = deque()  # Queue of remaining waypoints
+        self.finger_queue = deque() # Parallel queue for fingers
+
         self.total_waypoints = 0       # Total waypoints in original path
         self.current_waypoint_index = 0  # Index in original path
         self.current_target = None      # Current target pose
@@ -741,15 +746,15 @@ class DiscreteTeleopBehavior(ControlBehavior):
         )
         # Completion thresholds
         self.position_threshold = getattr(
-            self.controller, 'waypoint_position_threshold', 0.005  # 5mm
+            self.controller, 'waypoint_position_threshold', 0.01  # 10mm
         )
         self.orientation_threshold_deg = getattr(
-            self.controller, 'waypoint_orientation_threshold_deg', 5.0  # 5 degrees
+            self.controller, 'waypoint_orientation_threshold_deg', 10.0  # 5 degrees
         )
         
         # Safety timeout per waypoint
         self.waypoint_timeout_sec = getattr(
-            self.controller, 'waypoint_timeout_sec', 20.0  # 8 seconds
+            self.controller, 'waypoint_timeout_sec', 20.0  # 8 seco        
         )
     
         self.controller.get_logger().info(
@@ -858,6 +863,10 @@ class DiscreteTeleopBehavior(ControlBehavior):
                 "Waiting for waypoint path (send to /teleop/waypoint_path)"
             )
             # Don't automatically resume - wait for explicit resume command
+    
+        self.controller.get_logger().info(f"Entered discrete mode")
+        self.controller.pid_linear.reset()
+        self.controller.pid_angular.reset()
 
     def on_exit(self):
         """
@@ -884,7 +893,7 @@ class DiscreteTeleopBehavior(ControlBehavior):
     # WAYPOINT MANAGEMENT
     # ========================================================================
     
-    def load_waypoints(self, path: Path):
+    def load_waypoints(self, path: Path, finger_data) -> bool:
         """
         Load a new waypoint path for execution.
         
@@ -912,6 +921,8 @@ class DiscreteTeleopBehavior(ControlBehavior):
         self.total_waypoints = len(path.poses)
         self.current_waypoint_index = 0
         self.current_target = None
+        # Re-group the flattened [f1,f2,f3, f1,f2,f3] into [[f1,f2,f3], [f1,f2,f3]]
+        self.finger_queue = deque([finger_data[i:i+3] for i in range(0, len(finger_data), 3)]) if finger_data else deque()
         
         # Start execution
         self.internal_state = self.EXECUTING
@@ -940,7 +951,9 @@ class DiscreteTeleopBehavior(ControlBehavior):
         # Remove completed waypoint
         if self.waypoint_queue:
             self.waypoint_queue.popleft()
-        
+        if self.finger_queue:
+            self.finger_queue.popleft() # Keep them in sync
+
         # Increment index
         self.current_waypoint_index += 1
         
@@ -1007,6 +1020,7 @@ class DiscreteTeleopBehavior(ControlBehavior):
         Returns:
             True if waypoint reached, False otherwise
         """
+
         if not self.controller.current_pose or not self.current_target:
             return False
         
@@ -1036,8 +1050,14 @@ class DiscreteTeleopBehavior(ControlBehavior):
             target_pose.orientation.w
         ])
         
+        # Use the same dynamic target for the error check
+        tracking_offset = self.controller.get_tracking_compensation()
+        dynamic_target_rot = target_rot * tracking_offset
+
+        rot_diff = current_rot.inv() * dynamic_target_rot
+
         # Compute rotation difference
-        rot_diff = current_rot.inv() * target_rot
+        # rot_diff = current_rot.inv() * target_rot
         
         # Get angle magnitude from quaternion
         angle_error_rad = 2 * np.arccos(np.clip(abs(rot_diff.as_quat()[3]), 0.0, 1.0))
@@ -1045,12 +1065,12 @@ class DiscreteTeleopBehavior(ControlBehavior):
         orientation_reached = angle_error_deg < self.orientation_threshold_deg
         
         # Debug logging (can be commented out for production)
-        # self.controller.get_logger().debug(
-        #     f"Waypoint tracking - pos: {position_distance*1000:.1f}mm "
-        #     f"(thresh: {self.position_threshold*1000:.1f}mm), "
-        #     f"orient: {angle_error_deg:.1f}deg "
-        #     f"(thresh: {self.orientation_threshold_deg:.1f}deg)"
-        # )
+        self.controller.get_logger().debug(
+            f"Waypoint tracking - pos: {position_distance*1000:.1f}mm "
+            f"(thresh: {self.position_threshold*1000:.1f}mm), "
+            f"orient: {angle_error_deg:.1f}deg "
+            f"(thresh: {self.orientation_threshold_deg:.1f}deg)"
+        )
         orientation_reached = True
 
         return position_reached and orientation_reached
@@ -1091,6 +1111,7 @@ class DiscreteTeleopBehavior(ControlBehavior):
             Velocity command message
         """
 
+        ### Arm velocity ###
         if not self.controller.current_pose or not self.current_target:
             # Safety: return zero velocity if state is invalid
             msg = PoseVelocityWithFingerVelocity()
@@ -1100,26 +1121,20 @@ class DiscreteTeleopBehavior(ControlBehavior):
         target_pose = self.current_target.pose
         
 
-        # =====================================================================
-        # LINEAR VELOCITY CONTROL (PID version)
-        # =====================================================================
+        # ===================================== # 
+        # LINEAR VELOCITY CONTROL (PID version) #
+        # ===================================== #
+
+        # 1. Compute distance to target
         pos_error = np.array([
             target_pose.position.x - current_pose.pose.position.x,
             target_pose.position.y - current_pose.pose.position.y,
             target_pose.position.z - current_pose.pose.position.z
         ])
-
-        # self.controller.get_logger().info(
-        #     f"Position error to waypoint: "
-        #     f"x={pos_error[0]*1000:.0f}mm, "
-        #     f"y={pos_error[1]*1000:.0f}mm, "
-        #     f"z={pos_error[2]*1000:.0f}mm"
-        # )
-
-         # Compute distance to target
-        
+       
         distance = np.linalg.norm(pos_error)
         
+        # 2. Compute desired velocity based on the distance
         if distance > 0.001:  # Avoid division by zero
             direction = pos_error / distance
             
@@ -1144,28 +1159,58 @@ class DiscreteTeleopBehavior(ControlBehavior):
         else:
             target_velocity = np.zeros(3)
         
-        # ===== Angular Velocity (Orientation Control) =====
-        current_rot = self.controller.get_ee_rotation()
-        target_rot = Rotation.from_quat([
-            target_pose.orientation.x,
-            target_pose.orientation.y,
-            target_pose.orientation.z,
-            target_pose.orientation.w
-        ])
+        # ====================================== # 
+        # Angular Velocity (Orientation Control) #
+        # ====================================== # 
+
+        # 1. Get the base target rotation from the waypoint
+        target_pose = self.current_target.pose
         
+        # target_rot = Rotation.from_quat([
+        #     target_pose.orientation.x,
+        #     target_pose.orientation.y,
+        #     target_pose.orientation.z,
+        #     target_pose.orientation.w
+        # ])
+
+        waypoint_rot = Rotation.from_quat([
+            target_pose.orientation.x, target_pose.orientation.y,
+            target_pose.orientation.z, target_pose.orientation.w
+        ])
+
+        # 2. Apply Dynamic Tracking Compensation
+        # If tracking is enabled, we 'bend' the waypoint's orientation 
+        # towards the camera in real-time.
+        tracking_offset = self.controller.get_tracking_compensation()
+        dynamic_target_rot = waypoint_rot * tracking_offset 
+
+
+        # 3. Compute velocity to this DYNAMIC target
+        current_rot = self.controller.get_ee_rotation()
         if current_rot is not None:
-            # Use rotation controller to compute angular velocity
             angular_velocity = self.controller.rotation_controller.compute_angular_velocity(
-                target_rot, 
-                current_rot, 
-                pid_controller=None  # Use proportional control only
+                dynamic_target_rot, # Use the dynamic one, not the static one
+                current_rot,
+                pid_controller=self.controller.pid_angular
             )
-            
-            # Scale by speed parameter
-            angular_velocity *= self.discrete_motion_speed
         else:
             angular_velocity = np.zeros(3)
-        
+
+        ### Finger velocity ###
+        # 2. Finger velocity logic
+        target_finger_velocity = np.zeros(3)
+        if self.finger_queue:
+            target_f = self.finger_queue[0] # The fingers for the current waypoint
+            current_f = self.controller.current_finger_pose
+
+            # P-Control (Error * Gain)
+            # Using a gain of ~0.5 means it takes ~2 seconds to close fully
+            kp = 0.5 
+            f_vels = (target_f - current_f) * kp
+            
+            target_finger_velocity = np.clip(f_vels, -2000, 2000)
+
+
         # ===== Pack Into Message =====
         msg = PoseVelocityWithFingerVelocity()
         msg.twist_linear_x = float(target_velocity[0])
@@ -1174,9 +1219,10 @@ class DiscreteTeleopBehavior(ControlBehavior):
         msg.twist_angular_x = float(angular_velocity[0])
         msg.twist_angular_y = float(angular_velocity[1])
         msg.twist_angular_z = float(angular_velocity[2])
-        msg.finger1 = 0.0
-        msg.finger2 = 0.0
-        msg.finger3 = 0.0
+        msg.finger1 = float(target_finger_velocity[0])
+        msg.finger2 = float(target_finger_velocity[1])
+        msg.finger3 = float(target_finger_velocity[2])
+
         
         return msg
 
@@ -1302,8 +1348,7 @@ class RobotController(Node):
         super().__init__('robot_controller')
         
         # Params
-        self.max_linear_velocity = self.declare_parameter("max_linear_velocity", MAX_LINEAR_VELOCITY).value
-        self.quantization_degrees = self.declare_parameter("quantisation_degrees", 45.0).value
+        self._load_parameters()
         
         # Components
         self.pid_linear = PIDController(kp=0.8, ki=0.001, length=3)
@@ -1315,6 +1360,12 @@ class RobotController(Node):
             start_rotation=START_ROTATION,
             quantization_degrees=self.quantization_degrees
         )
+        # Finger
+        self.finger_controller = FingerController(self, max_velocity=self.max_finger_velocity)
+        self.current_finger_pose = np.zeros(3) # Track current state
+        self.target_finger_vels = [0.0, 0.0, 0.0]
+        
+        self.cached_waypoint_fingers = None # Cache for incoming discrete finger sequences
 
         # TF
         self.tf_buffer = Buffer()
@@ -1325,6 +1376,9 @@ class RobotController(Node):
         self.velocity_sub = self.create_subscription(TwistStamped, '/teleop/cartesian_velocity', self.velocity_callback, 10)
         self.pose_sub = self.create_subscription(PoseStamped, '/j2n6s300_driver/out/tool_pose', self.update_current_pose, 10)
         
+        self.finger_vel_sub = self.create_subscription(Float64MultiArray, '/teleop/finger_velocity', self.finger_vel_callback,10)
+        self.waypoint_finger_sub = self.create_subscription(Float64MultiArray, '/teleop/waypoint_fingers', self.waypoint_finger_callback, 10)
+
         # State
         self.current_pose = None
         self.current_vel = None
@@ -1340,6 +1394,7 @@ class RobotController(Node):
         }
         self.current_mode = "translation"
         self.current_behavior = self.behaviors["translation"]
+        self.get_logger().info(f"Initial control mode: {self.current_mode}")
         
         # Initialize ROS interfaces
         self._init_publishers()
@@ -1357,6 +1412,7 @@ class RobotController(Node):
         self.cartesian_movement_enabled = self.declare_parameter(
             "cartesian_movement_enabled", True).value
         
+
         # Max velocities
         self.max_linear_velocity = self.declare_parameter(
             "max_linear_velocity", list(MAX_LINEAR_VELOCITY)).value
@@ -1367,7 +1423,7 @@ class RobotController(Node):
         
         # PID parameters
         self.pid_enabled = self.declare_parameter("pid_enabled", True).value
-        self.kp_linear = self.declare_parameter("kp_linear", 0.8).value
+        self.kp_linear = self.declare_parameter("kp_linear", 0.7).value
         self.ki_linear = self.declare_parameter("ki_linear", 0.1).value
         self.kd_linear = self.declare_parameter("kd_linear", 0.0).value
         self.kp_angular = self.declare_parameter("kp_angular", 2.0).value
@@ -1380,7 +1436,7 @@ class RobotController(Node):
         
         # NEW: Discrete waypoint execution parameters
         self.discrete_motion_speed = self.declare_parameter(
-            "discrete_motion_speed", 1.5).value  # 150% of max velocity
+            "discrete_motion_speed", 0.70).value  # 150% of max velocity
         
         self.waypoint_position_threshold = self.declare_parameter(
             "waypoint_position_threshold", 0.005).value  # 5mm
@@ -1574,6 +1630,10 @@ class RobotController(Node):
         """Store latest velocity command from CommandMapper."""
         self.latest_velocity_cmd = msg
     
+    def finger_vel_callback(self, msg):
+        if len(msg.data) == 3:
+            self.target_finger_vels = list(msg.data)
+
     def waypoint_path_callback(self, msg: PoseStamped):
         """
         Handle incoming waypoint path messages.
@@ -1585,13 +1645,28 @@ class RobotController(Node):
                 "Switch to discrete mode first."
             )
             return
+
+        # If no finger data was cached, create a default "zero movement" list
+        if self.cached_waypoint_fingers is None:
+            self.get_logger().warn("No finger targets cached. Using default [0,0,0] for all waypoints.")
+            self.cached_waypoint_fingers = [0.0, 0.0, 0.0] * len(msg.poses)
+
+        # Forward BOTH to the behavior
+        # Helps in case finger arrives later
+        success = self.behaviors["discrete"].load_waypoints(msg, self.cached_waypoint_fingers)
         
-        # Forward to discrete behavior
-        success = self.behaviors["discrete"].load_waypoints(msg)
-        
-        if not success:
+        if success:
+            # Clear cache after loading
+            self.cached_waypoint_fingers = None
+        else:
             self.get_logger().error("Failed to load waypoint path")
                     
+    def waypoint_finger_callback(self, msg: Float64MultiArray):
+            """Cache the finger targets for the next incoming path."""
+            self.cached_waypoint_fingers = list(msg.data)
+            self.get_logger().info(f"Cached {len(msg.data)//3} finger targets for discrete path.")
+
+
     def system_callback(self, msg: str_msg):
         """Handle system commands."""
         cmd = msg.data
@@ -1676,36 +1751,53 @@ class RobotController(Node):
             return
         
         try:
-            # Process latest velocity command through current behavior
-            if self.latest_velocity_cmd:
-                cmd = self.current_behavior.process_velocity_command(self.latest_velocity_cmd)
+            # 1. Ask the behavior (Continuous or Discrete) for the next command
+            cmd = self.current_behavior.process_velocity_command(self.latest_velocity_cmd or TwistStamped())
+
+            if cmd:
+                # 2. If we are in Continuous modes, we still need to inject 
+                # manual finger velocities (Option 2.B)
+                if self.current_mode in ["translation", "rotation"]:
+                    cmd.finger1 = float(self.target_finger_vels[0])
+                    cmd.finger2 = float(self.target_finger_vels[1])
+                    cmd.finger3 = float(self.target_finger_vels[2])
                 
-                if cmd:
-                    # Publish debug information
-                    self.test_target_vel_pub.publish(Point(
-                        x=cmd.twist_linear_x,
-                        y=cmd.twist_linear_y,
-                        z=cmd.twist_linear_z
-                    ))
-                    
-                    # TODO: ? Odd, check later
-                    if self.current_vel is not None:
-                        self.test_measured_vel_pub.publish(Point(
-                            x=self.current_vel[0],
-                            y=self.current_vel[1],
-                            z=self.current_vel[2]
-                        ))
-                    
-                    # Publish velocity command
-                    self.vel_pub.publish(cmd)
+                # 3. Publish Debugging (Arm velocity)
+                self.test_target_vel_pub.publish(Point(x=cmd.twist_linear_x, y=cmd.twist_linear_y, z=cmd.twist_linear_z))
+                
+                # 4. Final Publish to Jaco
+                self.vel_pub.publish(cmd)
             else:
-                # No command - publish zero velocity
                 self.publish_zero_velocity()
+
         
         except Exception as e:
             self.get_logger().error(f'Error in control_tick: {e}')
             traceback.print_exc()
-    
+        
+    def get_tracking_compensation(self, camera_frame="camera_optical_frame", target_frame="aruco_91") -> Rotation:
+
+        """Computes the rotation offset required to point the target_frame at the camera_frame."""
+        pos_camera = self.get_frame_position(camera_frame, ROBOT_BASE_FRAME)
+        pos_ee = self.get_frame_position(target_frame, ROBOT_BASE_FRAME)
+        rot_ee = self.get_frame_rotation(target_frame, ROBOT_BASE_FRAME)
+
+        # Validity check (ensure frames exist and aren't at origin)
+        if pos_camera is None or pos_ee is None or rot_ee is None or np.linalg.norm(pos_camera) < 0.01:
+            return Rotation.from_quat([0, 0, 0, 1])
+
+        # Vector from End Effector to Camera in Base Frame
+        vec_to_target = pos_camera - pos_ee
+        # Transform to End Effector Local Space
+        vec_local = rot_ee.inv().apply(vec_to_target)
+
+        # Pitch (X) and Yaw (Z) logic from your working code
+        angle_x = np.arctan2(-vec_local[1], vec_local[2])
+        yz_magnitude = np.hypot(-vec_local[1], vec_local[2])
+        angle_z = -np.arctan2(vec_local[0], yz_magnitude)
+
+        return Rotation.from_euler('xz', [angle_x, angle_z], degrees=False)
+
     # ========================================================================
     # UTILITY METHODS
     # ========================================================================
