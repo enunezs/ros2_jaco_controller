@@ -40,6 +40,9 @@ To launch the container with the environment, run the following ready script:
 
 ```bash
 ./docker/1_dockerscript.sh
+
+colcon build --packages-select jacoarm-ros2 && source install/setup.bash
+
 ```
 
 This will pull the latest image from the docker store and run the container with the recommended settings.

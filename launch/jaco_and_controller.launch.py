@@ -23,16 +23,16 @@ def generate_launch_description():
     )
     launch_description.add_action(kinova_robot_launch)
 
-    # Moveit2
-    moveit_robot_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            [
-                os.path.join(get_package_share_directory("kinova_bringup"), "launch"),
-                "/moveit_robot_launch.py",
-            ]
-        )
-    )
-    launch_description.add_action(moveit_robot_launch)
+    # # Moveit2
+    # moveit_robot_launch = IncludeLaunchDescription(
+    #     PythonLaunchDescriptionSource(
+    #         [
+    #             os.path.join(get_package_share_directory("kinova_bringup"), "launch"),
+    #             "/moveit_robot_launch.py",
+    #         ]
+    #     )
+    # )
+    # launch_description.add_action(moveit_robot_launch)
 
     # Controller
     # ! Errors here
@@ -40,7 +40,7 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(
             [
                 os.path.join(get_package_share_directory("jacoarm-ros2"), "launch"),
-                "/controller.launch.py",
+                "/main_controller.launch.py",
             ]
         )
     )

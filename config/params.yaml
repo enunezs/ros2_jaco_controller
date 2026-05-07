@@ -13,7 +13,7 @@
     quantisation_degrees: 45.0
     pid_enabled: True
     kp_linear: 0.7
-    ki_linear: 0.1
+    ki_linear: 0.2
     kd_linear: 0.00
     kp_angular: 2.0
     ki_angular: 2.0
@@ -21,6 +21,6 @@
     discrete_motion_speed: 0.50
     waypoint_position_threshold: 0.005
     waypoint_orientation_threshold_deg: 5.0
-    waypoint_timeout_sec: 20.0
-    camera_rotation_compensation: False
+    waypoint_timeout_sec: 10.0
+    camera_rotation_compensation: True
     rotation_assistance: 2.0

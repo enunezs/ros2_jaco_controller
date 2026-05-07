@@ -41,7 +41,8 @@ from scipy.spatial.transform import Rotation, Slerp
 
 REFRESH_RATE = 100.0
 # Define start rotation (using Quaternions internally is safer)
-START_ROTATION = Rotation.from_euler('xyz', [-180-20, 0-5, 180-10], degrees=True)
+# START_ROTATION = Rotation.from_euler('xyz', [-180-20, 0-5, 180-10], degrees=True)
+START_ROTATION = Rotation.from_euler('xyz', [-180, 0-5, 180], degrees=True)
 MAX_LINEAR_VELOCITY = (0.1, 0.06, 0.08)
 MAX_ANGULAR_VELOCITY = 2.0
 MAX_FINGER_VELOCITY = 2000.0
@@ -101,8 +102,14 @@ class PIDController:
         if target_vel is None or current_vel is None:
             return np.zeros(self.length)
 
+        # 1. If target is zero, bleed the integral error to prevent drift
+        if np.linalg.norm(target_vel) < 1e-4:
+            self.integral_error *= 0.90  # Quickly decay the integral 
+            return np.zeros(self.length) # Return absolute zero
+
         # Error calculation
         current_error = target_vel - current_vel
+        current_error[np.abs(current_error) < 1e-4] = 0.0
 
         # Integral term with anti-windup
         self.integral_error += current_error * (1.0 / self.refresh_rate)
@@ -155,10 +162,11 @@ class VelocityIntegrator:
         self.max_velocity = np.array(max_velocity)
         self.prev_velocity = np.zeros(3)
         # TODO: Expose! Super important variable hiding here
-        self.forward_acceleration = np.array([0.015, 0.009, 0.012]) 
+        # self.forward_acceleration = np.array([0.0, 0.0, 0.0])/3
+        self.forward_acceleration = np.array([0.015, 0.009, 0.02])/3
         self.brake_acceleration = 0.8
-        self.min_speed = 0.027
-        self.deadzone = 0.2 # Input deadzone (0 to 1)
+        self.min_speed = [0.0135, 0.0135, 0.014]
+        self.deadzone = 0.05 # Input deadzone (0 to 1)
 
     def update(self, input_vector: np.ndarray, dt: float) -> np.ndarray:
         """
@@ -184,16 +192,16 @@ class VelocityIntegrator:
                 velocity[idx] -= movement_dir * self.brake_acceleration * dt
                 # self.get_logger().debug(f"Braking on axis {idx}: new velocity {velocity[idx]}")
                 
-                if abs(velocity[idx]) < self.min_speed * 1.5:
+                if abs(velocity[idx]) < self.min_speed[idx] * 1.5:
                     velocity[idx] = 0.0
             
             # Acceleration
             else:
-                velocity[idx] += input_dir * self.forward_acceleration[idx] * dt
+                velocity[idx] += input_dir * self.forward_acceleration[idx] * dt 
                 
                 # Fast start from rest
-                if abs(velocity[idx]) < self.min_speed:
-                    velocity[idx] = self.min_speed * np.sign(input_dir)
+                if abs(velocity[idx]) < self.min_speed[idx]:
+                    velocity[idx] = self.min_speed[idx] * np.sign(input_dir)
             
             # Clamp to max velocity
             velocity[idx] = np.clip(velocity[idx], -self.max_velocity[idx], self.max_velocity[idx])
@@ -297,7 +305,9 @@ class RotationController:
             max_falling_speed  = 1.5  # 150% speed when 'falling' between zones
             
             # Lerp between min and max based on distance from snap point
-            dynamic_gain = min_breakout_speed + (max_falling_speed - min_breakout_speed) * dist_factor
+            dynamic_gain = 1 # min_breakout_speed + (max_falling_speed - min_breakout_speed) * dist_factor
+            # TODO@ TEMP
+            # dynamic_gain = min_breakout_speed + (max_falling_speed - min_breakout_speed) * dist_factor
             
             # 4. Apply specific gain to specific axis input
             # This ensures if X is snapped but Y is not, Y still moves fast.
@@ -475,7 +485,9 @@ class ContinuousTeleopBehavior(ControlBehavior):
         ### Message Extraction ###
         # Extract Linear
         target_linear_vel = np.array([twist.twist.linear.x, twist.twist.linear.y, twist.twist.linear.z])
-
+        # + Deadzone
+        if np.linalg.norm(target_linear_vel) < 0.01: # 1% threshold
+            target_linear_vel = np.zeros(3)
         ######################################################
         ### 1. Handle Frame Transforms for Linear Velocity ###
         ######################################################
@@ -514,7 +526,7 @@ class ContinuousTeleopBehavior(ControlBehavior):
         if rotation_reference_frame is None:
             rotation_reference_frame = Rotation.from_quat([0,0,0,1])
 
-        ROTATION_OFFSET = Rotation.from_euler('xyz', [0, 180, 0], degrees=True)
+        ROTATION_OFFSET = Rotation.from_euler('xyz', [0-15, 180, -12], degrees=True) # Minor offset to account for only two fingers
 
         rotation_reference_frame = rotation_reference_frame * ROTATION_OFFSET
 
@@ -543,12 +555,12 @@ class ContinuousTeleopBehavior(ControlBehavior):
         # 2B. User Compensation (Optional)
         # TODO: Forcing for now
         input_frame = "camera_optical_frame"
-        aruco_frame = "aruco_91"
+        target_frame = "aruco_88"
+        # target_frame = "bt_UpHybridRe"
 
         user_compensation = True
 
-        user_tracking_rot = self.controller.get_tracking_compensation()
-
+        user_tracking_rot = self.controller.get_tracking_compensation(camera_frame=input_frame, target_frame=target_frame)
         # user_tracking_rot : Rotation =  Rotation.from_quat([0,0,0,1])
         # if user_compensation:
         #     pos_camera = self.controller.get_frame_position(input_frame, ROBOT_BASE_FRAME)
@@ -742,7 +754,7 @@ class DiscreteTeleopBehavior(ControlBehavior):
 
         # Speed as percentage of max velocity
         self.discrete_motion_speed = getattr(
-            self.controller, 'discrete_motion_speed', 0.5
+            self.controller, 'discrete_motion_speed', 0.4
         )
         # Completion thresholds
         self.position_threshold = getattr(
@@ -754,9 +766,14 @@ class DiscreteTeleopBehavior(ControlBehavior):
         
         # Safety timeout per waypoint
         self.waypoint_timeout_sec = getattr(
-            self.controller, 'waypoint_timeout_sec', 20.0  # 8 seco        
+            self.controller, 'waypoint_timeout_sec', 10.0  # 8 seco        
         )
-    
+        # Inside DiscreteTeleopBehavior._load_parameters
+        self.finger_tolerance = getattr(
+            self.controller, 'waypoint_finger_tolerance', 100.0
+        )
+
+        # Inside RobotController._load_parameters
         self.controller.get_logger().info(
             f"DiscreteTeleopBehavior initialized with thresholds: "
             f"speed={self.discrete_motion_speed*100:.0f}%, "
@@ -1013,7 +1030,7 @@ class DiscreteTeleopBehavior(ControlBehavior):
 
     def _check_reached_waypoint(self) -> bool:
         """
-        Check if current waypoint has been reached.
+        Check if current waypoint has been reached (Position, Orientation, AND Fingers).
         
         Requires both position and orientation to be within thresholds.
         
@@ -1022,12 +1039,13 @@ class DiscreteTeleopBehavior(ControlBehavior):
         """
 
         if not self.controller.current_pose or not self.current_target:
+            self.get_logger().warn("Cannot check waypoint - missing current pose or target")
             return False
         
         current_pose = self.controller.current_pose
         target_pose = self.current_target.pose
         
-        # ===== Position Check =====
+        # ===== 1. Position Check =====
         pos_error = np.array([
             target_pose.position.x - current_pose.pose.position.x,
             target_pose.position.y - current_pose.pose.position.y,
@@ -1035,8 +1053,12 @@ class DiscreteTeleopBehavior(ControlBehavior):
         ])
         position_distance = np.linalg.norm(pos_error)
         position_reached = position_distance < self.position_threshold
-        
-        # ===== Orientation Check =====
+
+        # if position_reached:
+            # self.cpmtrget_logger().info("Position reached!" , once = True)
+
+
+        # ===== 2. Orientation Check =====
         current_rot = self.controller.get_ee_rotation() 
         # todo: SHOULD USE INSTEAD PRIOR TO COMP -> COARSE TARGET?
         if current_rot is None:
@@ -1073,7 +1095,30 @@ class DiscreteTeleopBehavior(ControlBehavior):
         )
         orientation_reached = True
 
-        return position_reached and orientation_reached
+
+        # ===== 3. Finger Check (NEW) =====
+        finger_reached = True
+        if self.finger_queue:
+            target_f = self.finger_queue[0]
+            current_f = self.controller.current_finger_pose
+            
+            # Check absolute difference for each finger
+            f_errors = np.abs(target_f - current_f)
+            max_f_error = np.max(f_errors)
+            self.controller.get_logger().debug(
+                f"Finger tracking - max error: {max_f_error:.1f} "
+                f"(thresh: {self.finger_tolerance:.1f})"
+            )
+            
+            finger_reached = max_f_error < self.finger_tolerance
+            
+            # Optional Debugging
+            if not finger_reached and position_reached and orientation_reached:
+                self.controller.get_logger().info(
+                    f"Waiting for fingers: Max error {max_f_error:.1f} > {self.finger_tolerance}"
+                )
+
+        return position_reached and orientation_reached and finger_reached 
     
     def _check_timeout(self) -> bool:
         """
@@ -1197,6 +1242,7 @@ class DiscreteTeleopBehavior(ControlBehavior):
             angular_velocity = np.zeros(3)
 
         ### Finger velocity ###
+        # ! ERROR HERE
         # 2. Finger velocity logic
         target_finger_velocity = np.zeros(3)
         if self.finger_queue:
@@ -1353,7 +1399,7 @@ class RobotController(Node):
         # Components
         self.pid_linear = PIDController(kp=0.8, ki=0.001, length=3)
         self.pid_angular = PIDController(kp=0.95, ki=0.025, length=3) # PID for angular velocity
-        self.vel_filter = RollingAverageFilter(window_size=5)
+        self.vel_filter = RollingAverageFilter(window_size=10)
         self.vel_integrator = VelocityIntegrator(self.max_linear_velocity)
         
         self.rotation_controller = RotationController(
@@ -1401,6 +1447,12 @@ class RobotController(Node):
         self._init_subscribers()
         self._init_tf()
         
+        # Tracking for self-alignment
+        self.last_valid_tracking_offset = Rotation.from_quat([0, 0, 0, 1])
+        self.last_valid_input_to_base_rot = Rotation.from_quat([0, 0, 0, 1])
+        self.smoothed_camera_pos = None 
+        self.last_tracking_time = None  
+
         # Control timer
         self.control_timer = self.create_timer(1.0 / REFRESH_RATE, self.control_tick)
         
@@ -1777,25 +1829,63 @@ class RobotController(Node):
         
     def get_tracking_compensation(self, camera_frame="camera_optical_frame", target_frame="aruco_91") -> Rotation:
 
+        x_enabled = False
+        y_enabled = True
+
         """Computes the rotation offset required to point the target_frame at the camera_frame."""
         pos_camera = self.get_frame_position(camera_frame, ROBOT_BASE_FRAME)
         pos_ee = self.get_frame_position(target_frame, ROBOT_BASE_FRAME)
         rot_ee = self.get_frame_rotation(target_frame, ROBOT_BASE_FRAME)
 
-        # Validity check (ensure frames exist and aren't at origin)
+        # Basic validity check
         if pos_camera is None or pos_ee is None or rot_ee is None or np.linalg.norm(pos_camera) < 0.01:
-            return Rotation.from_quat([0, 0, 0, 1])
+            return self.last_valid_tracking_offset
+
+        # =================================================================
+        # 1. Calculate actual time delta (dt)
+        # =================================================================
+        current_time = self.get_clock().now()
+        if self.last_tracking_time is None:
+            dt = 1.0 / REFRESH_RATE
+        else:
+            dt = (current_time - self.last_tracking_time).nanoseconds * 1e-9
+        
+        self.last_tracking_time = current_time
+        
+        # Safety clamp: if the node hangs for a second, pretend only 0.1s passed 
+        # so it doesn't suddenly jump
+        dt = min(dt, 0.1)
+
+        # =================================================================
+        # 1. Smooth the user's head position (EMA Filter)
+        # =================================================================
+        
+        settle_gain = 2.5  # Higher = faster settling, but more jitter. Adjust as needed.
+
+        alpha = 1.0 - np.exp(-settle_gain * dt)
+        # alpha = 0.002  # Smoothing factor (0.0 to 1.0). Lower = smoother, less jitter.
+
+        if self.smoothed_camera_pos is None:
+            # First valid frame: initialize to exact position to prevent slow sweep
+            self.smoothed_camera_pos = pos_camera
+        else:
+            # Check if there's a massive jump (e.g., tracking lost and regained far away)
+            if np.linalg.norm(pos_camera - self.smoothed_camera_pos) > 0.5: # 50cm jump
+                self.smoothed_camera_pos = pos_camera
+            else:
+                # Standard EMA: New = (alpha * current) + ((1 - alpha) * previous)
+                self.smoothed_camera_pos = (alpha * pos_camera) + ((1.0 - alpha) * self.smoothed_camera_pos)
 
         # Vector from End Effector to Camera in Base Frame
-        vec_to_target = pos_camera - pos_ee
-        # Transform to End Effector Local Space
+        vec_to_target = self.smoothed_camera_pos - pos_ee
         vec_local = rot_ee.inv().apply(vec_to_target)
 
         # Pitch (X) and Yaw (Z) logic from your working code
-        angle_x = np.arctan2(-vec_local[1], vec_local[2])
+        angle_x = np.arctan2(-vec_local[1], vec_local[2])    if y_enabled  else 0
         yz_magnitude = np.hypot(-vec_local[1], vec_local[2])
-        angle_z = -np.arctan2(vec_local[0], yz_magnitude)
+        angle_z = -np.arctan2(vec_local[0], yz_magnitude)   if x_enabled else  0
 
+        self.last_valid_tracking_offset = Rotation.from_euler('xz', [angle_x, angle_z], degrees=False)
         return Rotation.from_euler('xz', [angle_x, angle_z], degrees=False)
 
     # ========================================================================
@@ -1890,6 +1980,7 @@ class RobotController(Node):
         """Rotates a vector from source frame to target frame."""
         if source_frame == target_frame:
             return vector
+        
         try:
             # We only care about rotation for vectors
             transform = self.tf_buffer.lookup_transform(target_frame, source_frame, rclpy.time.Time())
@@ -1899,10 +1990,12 @@ class RobotController(Node):
                 transform.transform.rotation.z,
                 transform.transform.rotation.w
             ])
+            self.last_valid_input_to_base_rot = rot
             return rot.apply(vector)
+        
         except (LookupException, ConnectivityException, ExtrapolationException):
             self.get_logger().warn(f"Could not transform vector {source_frame} -> {target_frame}")
-            return vector
+            return self.last_valid_input_to_base_rot.apply(vector)
 
     def get_frame_rotation(self, source_frame: str, target_frame: str) -> Optional[Rotation]:
         """Gets the rotation of source_frame represented in target_frame."""
@@ -1917,7 +2010,7 @@ class RobotController(Node):
                 transform.transform.rotation.w
             ])
         except (LookupException, ConnectivityException, ExtrapolationException):
-            return None
+            return self.last_valid_input_to_base_rot
 
     def get_frame_position(self, source_frame: str, target_frame: str) -> Optional[np.ndarray]:
         """Gets the position of source_frame represented in target_frame."""
