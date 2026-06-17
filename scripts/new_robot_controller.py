@@ -166,6 +166,7 @@ class VelocityIntegrator:
         self.forward_acceleration = np.array([0.015, 0.009, 0.02])/3
         self.brake_acceleration = 0.8
         self.min_speed = [0.0135, 0.0135, 0.014]
+        # self.min_speed = [0.008, 0.014, 0.01]
         self.deadzone = 0.05 # Input deadzone (0 to 1)
 
     def update(self, input_vector: np.ndarray, dt: float) -> np.ndarray:
@@ -1829,8 +1830,8 @@ class RobotController(Node):
         
     def get_tracking_compensation(self, camera_frame="camera_optical_frame", target_frame="aruco_91") -> Rotation:
 
-        x_enabled = False
-        y_enabled = True
+        x_enabled = True
+        y_enabled = False
 
         """Computes the rotation offset required to point the target_frame at the camera_frame."""
         pos_camera = self.get_frame_position(camera_frame, ROBOT_BASE_FRAME)
