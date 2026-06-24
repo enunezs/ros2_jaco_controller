@@ -296,7 +296,6 @@ class RotationController:
         # 2. Update Cumulative Rotation (Local Space)
         # ---------------------------------------------------------
 
-        # TODO: Not working now. Should be simple raw movement, good for testing
         # TODO: Should be done axis by axis
         if user_active:
             ### Apply integration and magnetic gain
@@ -322,8 +321,14 @@ class RotationController:
           
             ### 5. INTEGRATE: Apply input to current cumulative rotation
             rot_delta = Rotation.from_euler('xyz', orientation_change_vec, degrees=False)
-            self.cumulative_rotation = rot_delta * self.cumulative_rotation
-
+            
+            # Local Space Rotation
+            self.cumulative_rotation = self.cumulative_rotation * rot_delta
+            # A*B you can think of it as applying A as a global rotation to B. Or as applying B as a local rotation to A(*).
+            
+            # For reference only, global Space Rotation
+            # self.cumulative_rotation = rot_delta * self.cumulative_rotation
+            
         else:
             ### Settle towards nearest grid in LOCAL space ###
             
