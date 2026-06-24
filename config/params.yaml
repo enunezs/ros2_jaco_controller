@@ -10,7 +10,7 @@
     max_angular_velocity: 5.0
     max_finger_velocity: 2000.0
     discretise_rotation: True
-    quantisation_degrees: 45.0
+    quantisation_degrees: 30
     pid_enabled: True
     kp_linear: 0.7
     ki_linear: 0.2

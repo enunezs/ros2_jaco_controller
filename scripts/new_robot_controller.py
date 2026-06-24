@@ -271,7 +271,7 @@ class RotationController:
 
 
         # TODO: Expose speed factor as parameter
-        speed_factor = 0.3 # Rad/s max speed approx
+        speed_factor = 0.1 # Rad/s max speed approx
         # speed_factor = 10.0
         
         # 1. Deadband
@@ -391,8 +391,6 @@ class RotationController:
         else:
             return rot_vec * self.max_angular_velocity
 
-    def reset(self):
-        self.cumulative_rotation = START_ROTATION
 
 
     def old_compute_angular_velocity(self, target_rotation: Rotation, 
@@ -433,8 +431,12 @@ class RotationController:
         return angular_velocity
 
     def reset(self):
-        """Reset cumulative rotation."""
-        self.cumulative_rotation = np.zeros(3)
+        self.cumulative_rotation = START_ROTATION
+
+    # def reset(self):
+    #     """Reset cumulative rotation."""
+    #     # self.cumulative_rotation = np.zeros(3)
+    #     self.cumulative_rotation = Rotation.from_quat([0, 0, 0, 1])
 
 # ============================================================================
 # BEHAVIOR CLASSES
@@ -562,6 +564,7 @@ class ContinuousTeleopBehavior(ControlBehavior):
         user_compensation = True
 
         user_tracking_rot = self.controller.get_tracking_compensation(camera_frame=input_frame, target_frame=target_frame)
+
         # user_tracking_rot : Rotation =  Rotation.from_quat([0,0,0,1])
         # if user_compensation:
         #     pos_camera = self.controller.get_frame_position(input_frame, ROBOT_BASE_FRAME)
@@ -1040,7 +1043,7 @@ class DiscreteTeleopBehavior(ControlBehavior):
         """
 
         if not self.controller.current_pose or not self.current_target:
-            self.get_logger().warn("Cannot check waypoint - missing current pose or target")
+            self.controller.get_logger().warn("Cannot check waypoint - missing current pose or target")
             return False
         
         current_pose = self.controller.current_pose
@@ -1485,7 +1488,7 @@ class RobotController(Node):
 
         # Rotation
         self.discretize_rotation = self.declare_parameter("discretise_rotation", True).value
-        self.quantization_degrees = self.declare_parameter("quantisation_degrees", 45.0).value
+        self.quantization_degrees = self.declare_parameter("quantisation_degrees", 30).value
         
         # NEW: Discrete waypoint execution parameters
         self.discrete_motion_speed = self.declare_parameter(
