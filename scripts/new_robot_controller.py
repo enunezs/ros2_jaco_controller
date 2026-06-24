@@ -272,6 +272,10 @@ class RotationController:
                             If None, assumes input is already in Base frame.
         """
 
+        # --- Initialization for Virtual Gimbal ---
+        self.use_virtual_gimbal = True # Set to False to use the old Quaternion logic
+        self.accumulated_euler = self.cumulative_rotation.as_euler('xyz', degrees=True)
+
         # TODO: Not doing anything...
         # print("Orientation input:", orientation_input)
         if rotation_reference_frame:
@@ -280,74 +284,95 @@ class RotationController:
         # ---------------------------------------------------------
         # 1. Input deadband + user activity detection 
         # ---------------------------------------------------------
-        if np.linalg.norm(orientation_input) < 0.05:
-            user_active = False
-            # orientation_change_vec = np.zeros(3)
-        else:
-            user_active = True
-            # Raw input vector
-            # orientation_change_vec = orientation_input * speed_factor * dt
-            # print("Orientation change vec:", orientation_change_vec)
+        user_active = np.linalg.norm(orientation_input) >= 0.05
 
         # TODO: Expose speed factor as parameter
         speed_factor = 0.40 # Rad/s max speed approx
 
+        settle_gain = 6.0
+        min_breakout_speed = 0.2
+        max_falling_speed  = 2.0
+
         # ---------------------------------------------------------
         # 2. Update Cumulative Rotation (Local Space)
         # ---------------------------------------------------------
+        if self.use_virtual_gimbal:
+            # === MODE A: VIRTUAL GIMBAL (Float Accumulation) ===
+            if user_active:
+                # 1. Calculate gain axis-by-axis
+                # distance factor 0 at snap (N*45), 1 at midpoint
+                dist_factors = np.abs(np.sin(np.pi * (self.accumulated_euler / self.quantization_degrees)))
+                
+                # 2. Apply dynamic gain per axis
+                dynamic_gains = min_breakout_speed + (max_falling_speed - min_breakout_speed) * dist_factors
+                
+                # 3. Integrate floats (convert input rad/s to deg/s for the floats)
+                input_degrees_delta = np.degrees(orientation_input * speed_factor * dt)
+                self.accumulated_euler += input_degrees_delta * dynamic_gains
+                
+            else:
+                # 4. Snap floats to grid axis-by-axis
+                target_euler_snapped = np.round(self.accumulated_euler / self.quantization_degrees) * self.quantization_degrees
+                
+                # Smoothly lerp the floats
+                alpha = 1 - np.exp(-settle_gain * dt)
+                self.accumulated_euler += alpha * (target_euler_snapped - self.accumulated_euler)
 
-        # TODO: Should be done axis by axis
-        if user_active:
-            ### Apply integration and magnetic gain
+            # Keep angles within [-180, 180] to prevent overflow
+            self.accumulated_euler = (self.accumulated_euler + 180) % 360 - 180
+            
+            # Sync the cumulative_rotation object for the rest of the system
+            self.cumulative_rotation = Rotation.from_euler('xyz', self.accumulated_euler, degrees=True)
 
-            # 1. Get current local angles
-            curr_euler = self.cumulative_rotation.as_euler('xyz', degrees=True)
-            
-            # 2. Calculate Detent Gain using a sine wave pattern
-            # distance factor sin(0) = 0 (slow at snap), sin(90) = 1 (fast at midpoint)
-            dist_factor = np.abs(np.sin(np.pi * (curr_euler / self.quantization_degrees))) # 45 deg by default
 
-            # 3. Define speed limits (Percentage of max speed)
-            min_breakout_speed = 0.2  # 20% speed when stuck in a snap zone
-            max_falling_speed  = 2.0  # 150% speed when 'falling' between zones
-            
-            # 4. Lerp between min and max based on distance from snap point
-            dynamic_gain = min_breakout_speed + (max_falling_speed - min_breakout_speed) * dist_factor
-            # dynamic_gain = 1
-            orientation_change_vec = orientation_input * dynamic_gain * speed_factor * dt
-
-            # TODO@  Apply specific gain to specific axis input
-            # This ensures if X is snapped but Y is not, Y still moves fast.
-          
-            ### 5. INTEGRATE: Apply input to current cumulative rotation
-            rot_delta = Rotation.from_euler('xyz', orientation_change_vec, degrees=False)
-            
-            # Local Space Rotation
-            self.cumulative_rotation = self.cumulative_rotation * rot_delta
-            # A*B you can think of it as applying A as a global rotation to B. Or as applying B as a local rotation to A(*).
-            
-            # For reference only, global Space Rotation
-            # self.cumulative_rotation = rot_delta * self.cumulative_rotation
-            
         else:
-            ### Settle towards nearest grid in LOCAL space ###
-            
-            # A. Calculate the Snap Target (Local)
-            current_euler = self.cumulative_rotation.as_euler('xyz', degrees=True)
-            target_euler_snapped = np.round(current_euler / self.quantization_degrees) * self.quantization_degrees
-            target_rot_snapped = Rotation.from_euler('xyz', target_euler_snapped, degrees=True)
+            # === MODE B: QUATERNION INTEGRATION ===
+            if user_active:
+                ### Apply integration and magnetic gain
+                # 1. Get current local angles
+                curr_euler = self.cumulative_rotation.as_euler('xyz', degrees=True)
+                # 2. Calculate distance factor using a sine wave pattern. sin(0) = 0 (slow at snap), sin(90) = 1 (fast at midpoint)
+                dist_factors = np.abs(np.sin(np.pi * (curr_euler / self.quantization_degrees))) # 45 deg by default
 
-            # B. SLERP (Smooth) the Cumulative Rotation towards Snap Target
-            key_rots = Rotation.concatenate([self.cumulative_rotation, target_rot_snapped])
-            key_times = [0, 1]
+                # 3. Define speed limits (Percentage of max speed)
+                min_breakout_speed = 0.2  # 20% speed when stuck in a snap zone
+                max_falling_speed  = 2.0  # 150% speed when 'falling' between zones
+                
+                # 4. Lerp between min and max based on distance from snap point
+                dynamic_gain = min_breakout_speed + (max_falling_speed - min_breakout_speed) * dist_factors
+                # dynamic_gain = 1
+                orientation_change_vec = orientation_input * dynamic_gain * speed_factor * dt
 
-            slerp = Slerp(key_times, key_rots)
-            
-            # Update the persistent cumulative rotation
-            settle_gain = 6.0
-            alpha = 1 - np.exp(-settle_gain * dt) # Could be replaced by a constant...
-       
-            self.cumulative_rotation = slerp(alpha)
+                # This ensures if X is snapped but Y is not, Y still moves fast.
+                        ### 5. INTEGRATE: Apply input to current cumulative rotation
+                rot_delta = Rotation.from_euler('xyz', orientation_change_vec, degrees=False)
+                
+                # Local Space Rotation
+                self.cumulative_rotation = self.cumulative_rotation * rot_delta
+                # A*B you can think of it as applying A as a global rotation to B. Or as applying B as a local rotation to A(*).
+                #  A*B is B applied on local A, or global A applied to B, 
+                # For reference only, global Space Rotation
+                # self.cumulative_rotation = rot_delta * self.cumulative_rotation
+                
+            else:
+                ### Settle towards nearest grid in LOCAL space ###
+                
+                # A. Calculate the Snap Target (Local)
+                current_euler = self.cumulative_rotation.as_euler('xyz', degrees=True)
+                target_euler_snapped = np.round(current_euler / self.quantization_degrees) * self.quantization_degrees
+                target_rot_snapped = Rotation.from_euler('xyz', target_euler_snapped, degrees=True)
+
+                # B. SLERP (Smooth) the Cumulative Rotation towards Snap Target
+                key_rots = Rotation.concatenate([self.cumulative_rotation, target_rot_snapped])
+                key_times = [0, 1]
+
+                slerp = Slerp(key_times, key_rots)
+                
+                # Update the persistent cumulative rotation
+                settle_gain = 6.0
+                alpha = 1 - np.exp(-settle_gain * dt) # Could be replaced by a constant...
+        
+                self.cumulative_rotation = slerp(alpha)
 
         # ---------------------------------------------------------
         # 3. Apply Reference Frame (Global Space)
