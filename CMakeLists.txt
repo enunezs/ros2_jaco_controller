@@ -38,8 +38,6 @@ ament_python_install_package(scripts)
 
 install(PROGRAMS
   scripts/new_robot_controller.py
-  scripts/go_to_pose.py
-  scripts/mode_manager.py
   scripts/mode_manager.py
   DESTINATION lib/${PROJECT_NAME}
 )

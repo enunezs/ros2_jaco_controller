@@ -216,13 +216,18 @@ class VelocityIntegrator:
 
 class RotationController:
     """
-    Manages rotation control with quantization, tracking, and velocity computation.
+    Manages the 'User Controlled' part of the rotation chain.
+    Handles: 
+    - local integration
+    - quantization / grid-snapping
+    - friction feel.
+    - velocity computation.
     """
     
     def __init__(self, 
                  start_rotation: Rotation, 
-                 quantization_degrees: float = 30.0,
-                 max_angular_velocity: float = 2.0, 
+                 quantization_degrees: float = 45.0,
+                 max_angular_velocity: float = 2.0, # Rad/s max speed approx
                  refresh_rate: float = 100.0):
         """
         Initialize rotation controller.
@@ -235,7 +240,7 @@ class RotationController:
 
         self.start_rotation = start_rotation
         self.quantization_degrees = quantization_degrees
-        self.max_angular_velocity = max_angular_velocity
+        self.max_angular_velocity = max_angular_velocity 
         self.refresh_rate = refresh_rate
 
         self.discretize_enabled = True
@@ -247,16 +252,18 @@ class RotationController:
         # TODO: Add reference frame handling if needed
         self.reference_frame = "j2n6s300_link_base" #-> needs a setter?
 
+
     def update_target_rotation_from_input(self, 
                                           orientation_input: np.ndarray, 
                                           dt: float,
                                           rotation_reference_frame: Optional[Rotation] = None) -> Rotation:
+        
         """
+        Updates the internal target rotation based on user input relative to a specific frame.
+        
         Bi-stable rotation update:
         - When user is moving -> follow velocity input
         - When user stops -> settle to nearest quantized zone
-
-        Updates the internal target rotation based on user input relative to a specific frame.
         
         Args:
             orientation_input: [rx, ry, rz] velocity request from joystick (approx -1 to 1)
@@ -265,93 +272,87 @@ class RotationController:
                             If None, assumes input is already in Base frame.
         """
 
+        # TODO: Not doing anything...
         # print("Orientation input:", orientation_input)
         if rotation_reference_frame:
             self.rotation_reference_frame_buffer = rotation_reference_frame
-
-
-        # TODO: Expose speed factor as parameter
-        speed_factor = 0.1 # Rad/s max speed approx
-        # speed_factor = 10.0
         
-        # 1. Deadband
+        # ---------------------------------------------------------
+        # 1. Input deadband + user activity detection 
+        # ---------------------------------------------------------
         if np.linalg.norm(orientation_input) < 0.05:
             user_active = False
-            orientation_change_vec = np.zeros(3)
+            # orientation_change_vec = np.zeros(3)
         else:
             user_active = True
             # Raw input vector
-            orientation_change_vec = orientation_input * speed_factor * dt
+            # orientation_change_vec = orientation_input * speed_factor * dt
             # print("Orientation change vec:", orientation_change_vec)
 
-        # TODO: Changes: quantisation should only affect the accumulation offset, not the reference frame
+        # TODO: Expose speed factor as parameter
+        speed_factor = 0.40 # Rad/s max speed approx
 
         # ---------------------------------------------------------
-        # 1. Update Cumulative Rotation (Local Space)
+        # 2. Update Cumulative Rotation (Local Space)
         # ---------------------------------------------------------
+
+        # TODO: Not working now. Should be simple raw movement, good for testing
+        # TODO: Should be done axis by axis
         if user_active:
-            # Magnetic gain
+            ### Apply integration and magnetic gain
 
             # 1. Get current local angles
             curr_euler = self.cumulative_rotation.as_euler('xyz', degrees=True)
-            q = self.quantization_degrees
             
             # 2. Calculate Detent Gain using a sine wave pattern
-            # logic: sin(0) = 0 (slow at snap), sin(90) = 1 (fast at midpoint)
-            # We map the quantization step 'q' to PI radians.
-            dist_factor = np.abs(np.sin((curr_euler * np.pi) / q))
-            
+            # distance factor sin(0) = 0 (slow at snap), sin(90) = 1 (fast at midpoint)
+            dist_factor = np.abs(np.sin(np.pi * (curr_euler / self.quantization_degrees))) # 45 deg by default
+
             # 3. Define speed limits (Percentage of max speed)
             min_breakout_speed = 0.2  # 20% speed when stuck in a snap zone
-            max_falling_speed  = 1.5  # 150% speed when 'falling' between zones
+            max_falling_speed  = 2.0  # 150% speed when 'falling' between zones
             
-            # Lerp between min and max based on distance from snap point
-            dynamic_gain = 1 # min_breakout_speed + (max_falling_speed - min_breakout_speed) * dist_factor
-            # TODO@ TEMP
-            # dynamic_gain = min_breakout_speed + (max_falling_speed - min_breakout_speed) * dist_factor
-            
-            # 4. Apply specific gain to specific axis input
-            # This ensures if X is snapped but Y is not, Y still moves fast.
-            modulated_input = orientation_input * dynamic_gain
-            
-            orientation_change_vec = modulated_input * speed_factor * dt
+            # 4. Lerp between min and max based on distance from snap point
+            dynamic_gain = min_breakout_speed + (max_falling_speed - min_breakout_speed) * dist_factor
+            # dynamic_gain = 1
+            orientation_change_vec = orientation_input * dynamic_gain * speed_factor * dt
 
-            # INTEGRATE: Apply input to current state
+            # TODO@  Apply specific gain to specific axis input
+            # This ensures if X is snapped but Y is not, Y still moves fast.
+          
+            ### 5. INTEGRATE: Apply input to current cumulative rotation
             rot_delta = Rotation.from_euler('xyz', orientation_change_vec, degrees=False)
             self.cumulative_rotation = rot_delta * self.cumulative_rotation
+
         else:
-            # SMOOTH/SNAP: Settle towards nearest grid in LOCAL space
+            ### Settle towards nearest grid in LOCAL space ###
             
             # A. Calculate the Snap Target (Local)
             current_euler = self.cumulative_rotation.as_euler('xyz', degrees=True)
-            q = self.quantization_degrees
-            target_euler_snapped = np.round(current_euler / q) * q
+            target_euler_snapped = np.round(current_euler / self.quantization_degrees) * self.quantization_degrees
             target_rot_snapped = Rotation.from_euler('xyz', target_euler_snapped, degrees=True)
 
             # B. SLERP (Smooth) the Cumulative Rotation towards Snap Target
-            # We smooth the STATE, not the global output
-            settle_gain = 6.0
-            alpha = 1 - np.exp(-settle_gain * dt)
-            
-            key_times = [0, 1]
-            # ERROR FIXED HERE: Both rotations are now in Local Space
             key_rots = Rotation.concatenate([self.cumulative_rotation, target_rot_snapped])
+            key_times = [0, 1]
 
             slerp = Slerp(key_times, key_rots)
             
-            # Update the persistent state
+            # Update the persistent cumulative rotation
+            settle_gain = 6.0
+            alpha = 1 - np.exp(-settle_gain * dt) # Could be replaced by a constant...
+       
             self.cumulative_rotation = slerp(alpha)
 
         # ---------------------------------------------------------
-        # 2. Apply Reference Frame (Global Space)
+        # 3. Apply Reference Frame (Global Space)
         # ---------------------------------------------------------
         # Now we apply the reference frame to the (potentially smoothed) cumulative value.
         # Since user_active=False implies no new reference frame input, we rely on the buffer.
         
+                # Determine which reference frame to use
+        active_reference_frame = self.rotation_reference_frame_buffer
         
-        # Determine which reference frame to use
-        active_reference_frame = rotation_reference_frame if rotation_reference_frame is not None else self.rotation_reference_frame_buffer
-
         if active_reference_frame is not None:
             # Reference Frame * Offset * Smoothed_Local
             target_rot_composite = active_reference_frame  * self.cumulative_rotation
@@ -516,21 +517,25 @@ class ContinuousTeleopBehavior(ControlBehavior):
         ### 2. Handle Rotation Control ###
         ##################################
 
-        # 2A. We use the rotation reference frame as the baseline for starting. Rotations happen locally, but snaps happen relative to this.
-        # print(input_frame)
-        # if input_frame is None:
-            # input_frame = ROBOT_BASE_FRAME
-        rotation_reference_frame  = self.controller.get_frame_rotation(input_frame, ROBOT_BASE_FRAME)
-        # rotation_reference_frame = self.controller.get_ee_rotation()
-
+        # 2A. We use the rotation reference frame as the baseline for starting
         # This allows "Up" on joystick to mean "Up" in camera view
         # print(f"Rotation reference frame is: {rotation_reference_frame}")
 
+        rotation_reference_frame  = self.controller.get_frame_rotation(input_frame, ROBOT_BASE_FRAME)
+        # rotation_reference_frame = self.controller.get_ee_rotation()
         if rotation_reference_frame is None:
             rotation_reference_frame = Rotation.from_quat([0,0,0,1])
+        else:
+            pass
+            # print(f"Found ref frame {rotation_reference_frame.as_euler('xyz', degrees=True)}")
 
+        # Force for now
+        rotation_reference_frame = Rotation.from_quat([0,0,0,1])
+
+        # 2B. We apply an offset to account for the robot weird shape
         ROTATION_OFFSET = Rotation.from_euler('xyz', [0-15, 180, -12], degrees=True) # Minor offset to account for only two fingers
 
+        # 2. Final rotation
         rotation_reference_frame = rotation_reference_frame * ROTATION_OFFSET
 
         # =========================================================
@@ -550,7 +555,7 @@ class ContinuousTeleopBehavior(ControlBehavior):
             self.controller.publish_rotation_target(
                 rotation=rotation_reference_frame,
                 frame_id=ROBOT_BASE_FRAME,
-                child_frame_id="coarse_target", 
+                child_frame_id="01_baseline_rotation", 
                 visual_offset=debug_xyz
             )
         # =========================================================
@@ -633,7 +638,7 @@ class ContinuousTeleopBehavior(ControlBehavior):
             self.controller.publish_rotation_target(
                 rotation=compensated_rotation_reference_frame,
                 frame_id=ROBOT_BASE_FRAME,
-                child_frame_id="post_user_compensation", 
+                child_frame_id="02_post_user_compensation", 
                 visual_offset=debug_xyz
             )
         # =========================================================
@@ -645,7 +650,7 @@ class ContinuousTeleopBehavior(ControlBehavior):
         rotation_target = self.controller.rotation_controller.update_target_rotation_from_input(
             target_angular_input,
             dt=1.0/REFRESH_RATE,
-            rotation_reference_frame=compensated_rotation_reference_frame
+            rotation_reference_frame=rotation_reference_frame # -> TODO: add rotation frame of the message
         )
 
         # Visualize Target
@@ -662,7 +667,7 @@ class ContinuousTeleopBehavior(ControlBehavior):
             self.controller.publish_rotation_target(
                 rotation=rotation_target,
                 frame_id=ROBOT_BASE_FRAME,        # Parent frame (usually link_base)
-                child_frame_id="target_orientation_ghost", 
+                child_frame_id="03_user_target_orientation", 
                 visual_offset=current_xyz
             )
 
@@ -1488,7 +1493,7 @@ class RobotController(Node):
 
         # Rotation
         self.discretize_rotation = self.declare_parameter("discretise_rotation", True).value
-        self.quantization_degrees = self.declare_parameter("quantisation_degrees", 30).value
+        self.quantization_degrees = self.declare_parameter("quantisation_degrees", 45).value
         
         # NEW: Discrete waypoint execution parameters
         self.discrete_motion_speed = self.declare_parameter(
