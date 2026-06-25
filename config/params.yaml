@@ -7,17 +7,17 @@
       - 0.1
       - 0.06
       - 0.08
-    max_angular_velocity: 5.0
+    max_angular_velocity: 8.0
     max_finger_velocity: 2000.0
     discretise_rotation: True
     quantisation_degrees: 30
     pid_enabled: True
-    kp_linear: 0.7
-    ki_linear: 0.2
-    kd_linear: 0.00
-    kp_angular: 2.0
-    ki_angular: 2.0
-    kd_angular: 5.0
+    kp_linear: 0.82
+    ki_linear: 0.005
+    kd_linear: 0.001
+    kp_angular: 2.00
+    ki_angular: 0.05
+    kd_angular: 0.001
     discrete_motion_speed: 0.50
     waypoint_position_threshold: 0.005
     waypoint_orientation_threshold_deg: 5.0

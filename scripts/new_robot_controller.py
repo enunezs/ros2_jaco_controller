@@ -227,7 +227,7 @@ class RotationController:
     def __init__(self, 
                  start_rotation: Rotation, 
                  quantization_degrees: float = 45.0,
-                 max_angular_velocity: float = 2.0, # Rad/s max speed approx
+                 max_angular_velocity: float = 1.0, # Rad/s max speed approx
                  refresh_rate: float = 100.0):
         """
         Initialize rotation controller.
@@ -243,13 +243,15 @@ class RotationController:
         self.max_angular_velocity = max_angular_velocity 
         self.refresh_rate = refresh_rate
 
-        self.discretize_enabled = True
+        # SETTINGS
+        self.discretize_enabled = True  # Toggle this to False for continuous mode
+        self.use_virtual_gimbal = True  # True = Virtual Gimbal, False = Local Quaternion
+
+        # PERSISTENT STATE
+        self.cumulative_rotation : Rotation = Rotation.from_quat([0,0,0,1]) # Start from no rotation offset
+        self.accumulated_euler = np.zeros(3) 
+
         self.rotation_reference_frame_buffer : Optional[Rotation] = None
-
-        # Start from no rotation offset
-        self.cumulative_rotation : Rotation = Rotation.from_quat([0,0,0,1])
-
-        # TODO: Add reference frame handling if needed
         self.reference_frame = "j2n6s300_link_base" #-> needs a setter?
 
 
@@ -272,26 +274,25 @@ class RotationController:
                             If None, assumes input is already in Base frame.
         """
 
-        # --- Initialization for Virtual Gimbal ---
-        self.use_virtual_gimbal = True # Set to False to use the old Quaternion logic
-        self.accumulated_euler = self.cumulative_rotation.as_euler('xyz', degrees=True)
-
         # TODO: Not doing anything...
-        # print("Orientation input:", orientation_input)
         if rotation_reference_frame:
             self.rotation_reference_frame_buffer = rotation_reference_frame
-        
+      
+
+        # --- Initialization for Virtual Gimbal ---
+        self.accumulated_euler = self.cumulative_rotation.as_euler('xyz', degrees=True)
+
         # ---------------------------------------------------------
         # 1. Input deadband + user activity detection 
         # ---------------------------------------------------------
         user_active = np.linalg.norm(orientation_input) >= 0.05
 
         # TODO: Expose speed factor as parameter
-        speed_factor = 0.40 # Rad/s max speed approx
-
+        speed_factor = 0.30 # Rad/s max speed approx
         settle_gain = 6.0
-        min_breakout_speed = 0.2
-        max_falling_speed  = 2.0
+
+        min_breakout_speed = 0.4
+        max_falling_speed  = 1.2
 
         # ---------------------------------------------------------
         # 2. Update Cumulative Rotation (Local Space)
@@ -299,54 +300,56 @@ class RotationController:
         if self.use_virtual_gimbal:
             # === MODE A: VIRTUAL GIMBAL (Float Accumulation) ===
             if user_active:
-                # 1. Calculate gain axis-by-axis
-                # distance factor 0 at snap (N*45), 1 at midpoint
-                dist_factors = np.abs(np.sin(np.pi * (self.accumulated_euler / self.quantization_degrees)))
+                if self.discretize_enabled:
+                    # --- MAGNETIC GRID GAIN ---
+
+                    # 1. Calculate gain axis-by-axis
+                    # distance factor 0 at snap (N*45), 1 at midpoint
+                    dist_factors = np.abs(np.sin(np.pi * (self.accumulated_euler / self.quantization_degrees)))
+                    # 2. Apply dynamic gain per axis
+                    dynamic_gains = min_breakout_speed + (max_falling_speed - min_breakout_speed) * dist_factors
                 
-                # 2. Apply dynamic gain per axis
-                dynamic_gains = min_breakout_speed + (max_falling_speed - min_breakout_speed) * dist_factors
-                
+                else:
+                    # --- CONTINUOUS MODE GAIN ---
+                    dynamic_gains = 1.0
+
                 # 3. Integrate floats (convert input rad/s to deg/s for the floats)
                 input_degrees_delta = np.degrees(orientation_input * speed_factor * dt)
                 self.accumulated_euler += input_degrees_delta * dynamic_gains
-                
+
             else:
-                # 4. Snap floats to grid axis-by-axis
-                target_euler_snapped = np.round(self.accumulated_euler / self.quantization_degrees) * self.quantization_degrees
-                
-                # Smoothly lerp the floats
-                alpha = 1 - np.exp(-settle_gain * dt)
-                self.accumulated_euler += alpha * (target_euler_snapped - self.accumulated_euler)
+                if self.discretize_enabled:
+                    # 4. Snap floats to grid axis-by-axis
+                    target_euler_snapped = np.round(self.accumulated_euler / self.quantization_degrees) * self.quantization_degrees
+                    
+                    # Smoothly lerp the floats
+                    alpha = 1 - np.exp(-settle_gain * dt)
+                    self.accumulated_euler += alpha * (target_euler_snapped - self.accumulated_euler)
 
             # Keep angles within [-180, 180] to prevent overflow
             self.accumulated_euler = (self.accumulated_euler + 180) % 360 - 180
             
-            # Sync the cumulative_rotation object for the rest of the system
+            # Rebuild the rotation object from the gimbal setting
             self.cumulative_rotation = Rotation.from_euler('xyz', self.accumulated_euler, degrees=True)
 
 
         else:
             # === MODE B: QUATERNION INTEGRATION ===
             if user_active:
-                ### Apply integration and magnetic gain
-                # 1. Get current local angles
-                curr_euler = self.cumulative_rotation.as_euler('xyz', degrees=True)
-                # 2. Calculate distance factor using a sine wave pattern. sin(0) = 0 (slow at snap), sin(90) = 1 (fast at midpoint)
-                dist_factors = np.abs(np.sin(np.pi * (curr_euler / self.quantization_degrees))) # 45 deg by default
+                if self.discretize_enabled:
+                    ### Apply integration and magnetic gain
+                    # 1. Get current local angles
+                    curr_euler = self.cumulative_rotation.as_euler('xyz', degrees=True)
+                    # 2. Calculate distance factor using a sine wave pattern. sin(0) = 0 (slow at snap), sin(90) = 1 (fast at midpoint)
+                    dist_factors = np.abs(np.sin(np.pi * (curr_euler / self.quantization_degrees))) # 45 deg by default
+                    # 3. Lerp between min and max based on distance from snap point
+                    dynamic_gain = min_breakout_speed + (max_falling_speed - min_breakout_speed) * dist_factors
+                else:
+                    dynamic_gain = 1
 
-                # 3. Define speed limits (Percentage of max speed)
-                min_breakout_speed = 0.2  # 20% speed when stuck in a snap zone
-                max_falling_speed  = 2.0  # 150% speed when 'falling' between zones
-                
-                # 4. Lerp between min and max based on distance from snap point
-                dynamic_gain = min_breakout_speed + (max_falling_speed - min_breakout_speed) * dist_factors
-                # dynamic_gain = 1
                 orientation_change_vec = orientation_input * dynamic_gain * speed_factor * dt
-
-                # This ensures if X is snapped but Y is not, Y still moves fast.
-                        ### 5. INTEGRATE: Apply input to current cumulative rotation
+                ### 5. INTEGRATE: Apply input to current cumulative rotation
                 rot_delta = Rotation.from_euler('xyz', orientation_change_vec, degrees=False)
-                
                 # Local Space Rotation
                 self.cumulative_rotation = self.cumulative_rotation * rot_delta
                 # A*B you can think of it as applying A as a global rotation to B. Or as applying B as a local rotation to A(*).
@@ -355,24 +358,24 @@ class RotationController:
                 # self.cumulative_rotation = rot_delta * self.cumulative_rotation
                 
             else:
-                ### Settle towards nearest grid in LOCAL space ###
-                
-                # A. Calculate the Snap Target (Local)
-                current_euler = self.cumulative_rotation.as_euler('xyz', degrees=True)
-                target_euler_snapped = np.round(current_euler / self.quantization_degrees) * self.quantization_degrees
-                target_rot_snapped = Rotation.from_euler('xyz', target_euler_snapped, degrees=True)
+                if self.discretize_enabled:
+                    ### Settle towards nearest grid in LOCAL space ###
+                    
+                    # A. Calculate the Snap Target (Local)
+                    current_euler = self.cumulative_rotation.as_euler('xyz', degrees=True)
+                    target_euler_snapped = np.round(current_euler / self.quantization_degrees) * self.quantization_degrees
+                    target_rot_snapped = Rotation.from_euler('xyz', target_euler_snapped, degrees=True)
 
-                # B. SLERP (Smooth) the Cumulative Rotation towards Snap Target
-                key_rots = Rotation.concatenate([self.cumulative_rotation, target_rot_snapped])
-                key_times = [0, 1]
-
-                slerp = Slerp(key_times, key_rots)
-                
-                # Update the persistent cumulative rotation
-                settle_gain = 6.0
-                alpha = 1 - np.exp(-settle_gain * dt) # Could be replaced by a constant...
-        
-                self.cumulative_rotation = slerp(alpha)
+                    # B. SLERP (Smooth) the Cumulative Rotation towards Snap Target
+                    key_rots = Rotation.concatenate([self.cumulative_rotation, target_rot_snapped])
+                    key_times = [0, 1]
+                    slerp = Slerp(key_times, key_rots)
+                    
+                    # Update the persistent cumulative rotation
+                    settle_gain = 6.0
+                    alpha = 1 - np.exp(-settle_gain * dt) # Could be replaced by a constant...
+            
+                    self.cumulative_rotation = slerp(alpha)
 
         # ---------------------------------------------------------
         # 3. Apply Reference Frame (Global Space)
@@ -380,7 +383,7 @@ class RotationController:
         # Now we apply the reference frame to the (potentially smoothed) cumulative value.
         # Since user_active=False implies no new reference frame input, we rely on the buffer.
         
-                # Determine which reference frame to use
+        # Determine which reference frame to use
         active_reference_frame = self.rotation_reference_frame_buffer
         
         if active_reference_frame is not None:
@@ -388,7 +391,7 @@ class RotationController:
             target_rot_composite = active_reference_frame  * self.cumulative_rotation
         else:
             # Fallback if no reference frame ever received
-            target_rot_composite = Rotation.from_quat([0,0,0,1]) * self.cumulative_rotation
+            target_rot_composite = self.cumulative_rotation
 
         return target_rot_composite
 
@@ -407,7 +410,7 @@ class RotationController:
         error_rot = current_rotation.inv() * target_rotation # Local Frame
         
         # 2. Convert to Rotation Vector (Axis-Angle)
-        rot_vec = error_rot.as_rotvec() # Vector direction = axis, Magnitude = angle (rads)
+        rot_vec = error_rot.as_rotvec() * self.max_angular_velocity # Vector direction = axis, Magnitude = angle (rads)
         
         # 3. Clamp Magnitude (Safety)
         mag = np.linalg.norm(rot_vec)
@@ -418,9 +421,9 @@ class RotationController:
         # 4. PID or Proportional
         if pid_controller:
              # Assuming PID controller keeps track of dt internally
-            return pid_controller.control_update(rot_vec, np.zeros(3))
+            return pid_controller.control_update(rot_vec , np.zeros(3))
         else:
-            return rot_vec * self.max_angular_velocity
+            return rot_vec
 
 
 
@@ -680,8 +683,12 @@ class ContinuousTeleopBehavior(ControlBehavior):
         rotation_target = self.controller.rotation_controller.update_target_rotation_from_input(
             target_angular_input,
             dt=1.0/REFRESH_RATE,
-            rotation_reference_frame=rotation_reference_frame # -> TODO: add rotation frame of the message
+            # rotation_reference_frame=rotation_reference_frame # -> TODO: add rotation frame of the message
+            rotation_reference_frame=compensated_rotation_reference_frame # -> TODO: add rotation frame of the message
         )
+
+        # final_rotation_target = rotation_reference_frame * user_tracking_rot * rotation_target
+        final_rotation_target = rotation_target
 
         # Visualize Target
         if self.controller.current_pose:
@@ -705,7 +712,7 @@ class ContinuousTeleopBehavior(ControlBehavior):
         current_ee_rot = self.controller.get_ee_rotation()
         if current_ee_rot:
             target_angular_vel = self.controller.rotation_controller.compute_angular_velocity(
-                rotation_target,
+                final_rotation_target,
                 current_ee_rot,
                 pid_controller= self.controller.pid_angular
             )
@@ -1436,8 +1443,9 @@ class RobotController(Node):
         self._load_parameters()
         
         # Components
-        self.pid_linear = PIDController(kp=0.8, ki=0.001, length=3)
-        self.pid_angular = PIDController(kp=0.95, ki=0.025, length=3) # PID for angular velocity
+        self.pid_linear = PIDController(kp=self.kp_linear, ki=self.ki_linear, kd=self.kd_linear, length=3)
+        self.pid_angular = PIDController(kp=self.kp_angular, ki=self.ki_angular, kd=self.kd_angular, length=3) # PID for angular velocity
+
         self.vel_filter = RollingAverageFilter(window_size=10)
         self.vel_integrator = VelocityIntegrator(self.max_linear_velocity)
         
