@@ -143,8 +143,11 @@ class RollingAverageFilter:
 
     def update(self, value: float) -> float:
         """Add new value and return filtered output."""
-        self.values.append(value)
-        return sum(self.values) / len(self.values)
+        # self.values.append(value)
+        # return sum(self.values) / len(self.values)
+
+        self.values.append(np.array(value, dtype=float))
+        return np.mean(self.values, axis=0)
 
     def reset(self):
         """Clear filter state."""
@@ -244,8 +247,8 @@ class RotationController:
         self.refresh_rate = refresh_rate
 
         # SETTINGS
-        self.discretize_enabled = True  # Toggle this to False for continuous mode
-        self.use_virtual_gimbal = True  # True = Virtual Gimbal, False = Local Quaternion
+        self.discretize_enabled = False  # Toggle this to False for continuous mode
+        self.use_virtual_gimbal = False  # True = Virtual Gimbal, False = Local Quaternion
 
         # PERSISTENT STATE
         self.cumulative_rotation : Rotation = Rotation.from_quat([0,0,0,1]) # Start from no rotation offset
@@ -288,7 +291,7 @@ class RotationController:
         user_active = np.linalg.norm(orientation_input) >= 0.05
 
         # TODO: Expose speed factor as parameter
-        speed_factor = 0.30 # Rad/s max speed approx
+        speed_factor = 0.15 # Rad/s max speed approx
         settle_gain = 6.0
 
         min_breakout_speed = 0.4
@@ -316,7 +319,7 @@ class RotationController:
                 # 3. Integrate floats (convert input rad/s to deg/s for the floats)
                 input_degrees_delta = np.degrees(orientation_input * speed_factor * dt)
                 self.accumulated_euler += input_degrees_delta * dynamic_gains
-
+                # print(f"Accumulated Euler: {self.accumulated_euler}, Input: {orientation_input}") #, Dynamic Gains: {dynamic_gains}")
             else:
                 if self.discretize_enabled:
                     # 4. Snap floats to grid axis-by-axis
@@ -327,7 +330,7 @@ class RotationController:
                     self.accumulated_euler += alpha * (target_euler_snapped - self.accumulated_euler)
 
             # Keep angles within [-180, 180] to prevent overflow
-            self.accumulated_euler = (self.accumulated_euler + 180) % 360 - 180
+            # self.accumulated_euler = (self.accumulated_euler + 180) % 360 - 180
             
             # Rebuild the rotation object from the gimbal setting
             self.cumulative_rotation = Rotation.from_euler('xyz', self.accumulated_euler, degrees=True)
@@ -388,7 +391,7 @@ class RotationController:
         
         if active_reference_frame is not None:
             # Reference Frame * Offset * Smoothed_Local
-            target_rot_composite = active_reference_frame  * self.cumulative_rotation
+            target_rot_composite = self.cumulative_rotation * active_reference_frame
         else:
             # Fallback if no reference frame ever received
             target_rot_composite = self.cumulative_rotation
@@ -513,18 +516,24 @@ class ContinuousTeleopBehavior(ControlBehavior):
         super().__init__(controller)
     
     def process_velocity_command(self, twist: TwistStamped) -> Optional[PoseVelocityWithFingerVelocity]:
+
         """
         Process continuous velocity command with PID and smoothing.
         """
         if not self.controller.current_pose:
             return None
         
-        ### Message Extraction ###
-        # Extract Linear
+        # dt = 1.0 / REFRESH_RATE
+        # input_frame = twist.header.frame_id or ROBOT_BASE_FRAME
+
+        # 1. Compute Linear Velocity
         target_linear_vel = np.array([twist.twist.linear.x, twist.twist.linear.y, twist.twist.linear.z])
-        # + Deadzone
+        # Deadzone
         if np.linalg.norm(target_linear_vel) < 0.01: # 1% threshold
             target_linear_vel = np.zeros(3)
+        
+        # 2. Determine Reference Frame and User Compensation
+
         ######################################################
         ### 1. Handle Frame Transforms for Linear Velocity ###
         ######################################################
@@ -532,11 +541,15 @@ class ContinuousTeleopBehavior(ControlBehavior):
         # The Twist message tells us what frame the input is in (e.g., "head_camera", "base_link")
         input_frame = twist.header.frame_id        
 
+        # 2B. We apply an offset to account for the robot weird shape
+        ROTATION_OFFSET = Rotation.from_euler('xyz', [0-15, 180, -12], degrees=True) # Minor offset to account for only two fingers
+
         # If input is not in base frame, rotate the linear velocity vector
         if input_frame and input_frame != ROBOT_BASE_FRAME:
             target_linear_vel = self.controller.transform_vector(
                 target_linear_vel, input_frame, ROBOT_BASE_FRAME
             )
+            target_linear_vel = ROTATION_OFFSET.inv().apply(target_linear_vel)
 
         # Apply Smoothing & PID (Linear)
         target_linear_vel = self.controller.vel_integrator.update(target_linear_vel, dt=1.0/REFRESH_RATE)
@@ -565,11 +578,12 @@ class ContinuousTeleopBehavior(ControlBehavior):
         # Force for now
         rotation_reference_frame = Rotation.from_quat([0,0,0,1])
 
-        # 2B. We apply an offset to account for the robot weird shape
-        ROTATION_OFFSET = Rotation.from_euler('xyz', [0-15, 180, -12], degrees=True) # Minor offset to account for only two fingers
 
         # 2. Final rotation
+        # ROTATION_OFFSET = Rotation.from_euler('xyz', [0, 180, 0], degrees=True) # Minor offset to account for only two fingers
         rotation_reference_frame = rotation_reference_frame * ROTATION_OFFSET
+        # rotation_reference_frame = rotation_reference_frame
+
 
         # =========================================================
         # DEBUG: Visualize the Rotation Reference Frame
@@ -596,62 +610,14 @@ class ContinuousTeleopBehavior(ControlBehavior):
         # 2B. User Compensation (Optional)
         # TODO: Forcing for now
         input_frame = "camera_optical_frame"
-        target_frame = "aruco_88"
-        # target_frame = "bt_UpHybridRe"
+        target_frame = "bt_UpHybridRe"
 
-        user_compensation = True
-
-        user_tracking_rot = self.controller.get_tracking_compensation(camera_frame=input_frame, target_frame=target_frame)
-
-        # user_tracking_rot : Rotation =  Rotation.from_quat([0,0,0,1])
-        # if user_compensation:
-        #     pos_camera = self.controller.get_frame_position(input_frame, ROBOT_BASE_FRAME)
-        #     pos_ee = self.controller.get_frame_position(aruco_frame, ROBOT_BASE_FRAME)
-        #     rot_ee = self.controller.get_frame_rotation(aruco_frame, ROBOT_BASE_FRAME)
-
-        #     # Check, if the position of the camera frame is close to zero, it means it doesnt exist
-
-
-        #     if (pos_camera is not None) and \
-        #             (pos_ee is not None)  and \
-        #             (rot_ee is not None) and \
-        #             (not np.linalg.norm(pos_camera) < 0.01):
-                
-        #         # A. Vector from End Effector to Camera (in World/Base Frame)
-        #         vec_to_target = pos_camera - pos_ee
-
-        #         # B. Transform Vector to End Effector's LOCAL Space
-        #         # This is the crucial step. It tells us where the camera is 
-        #         # from the perspective of the gripper.
-        #         vec_local = rot_ee.inv().apply(vec_to_target)
-
-        #         # C. Calculate Angle around X-Axis
-        #         # --- Rotation 1: Around X (Pitch/Tilt) ---
-        #         # We want the Local Y-axis (0,1,0) to point towards the vector.
-        #         # So we project the vector onto the Y-Z plane and find the angle.
-        #         # arctan2(opposite, adjacent) -> arctan2(z, y)
-        #         angle_x = np.arctan2(-vec_local[1], vec_local[2])
-
-        #         # --- Rotation 2: Around Z (Yaw/Pan) ---
-        #         # After X-rotation, the vector length in the YZ plane is hypot(y,z).
-        #         # We compare X against that length.
-        #         # Note: We use -x because positive Z-rotation moves Y towards -X
-        #         yz_magnitude = np.hypot(-vec_local[1], vec_local[2])
-        #         # angle_z = 0
-        #         angle_z = -np.arctan2(vec_local[0], yz_magnitude)
-
-        #         # if angles greater than 30, skip 
-        #         # if abs(angle_x) > np.radians(30) or abs(angle_z) > np.radians(30):
-        #         #     angle_x = 0
-        #         #     angle_z = 0
-
-        #         # angle_z = 0 
-        #         # D. Create the single-axis correction rotation
-        #         user_tracking_rot : Rotation = Rotation.from_euler('xz', [angle_x, angle_z], degrees=False)
-
-        #         # E. Apply correction to current orientation
-        #         # New = Current * Correction (Intrinsic rotation)
-
+        user_compensation = False
+        if user_compensation:
+            user_tracking_rot = self.controller.get_tracking_compensation(camera_frame=input_frame, target_frame=target_frame)
+        else:
+            user_tracking_rot : Rotation =  Rotation.from_quat([0,0,0,1])
+            
         compensated_rotation_reference_frame = rotation_reference_frame * user_tracking_rot
 
         # =========================================================
@@ -723,7 +689,6 @@ class ContinuousTeleopBehavior(ControlBehavior):
          # Construct Message
         msg = PoseVelocityWithFingerVelocity()
         msg.twist_linear_x, msg.twist_linear_y, msg.twist_linear_z = target_linear_vel
-        # TODO: Temp disable
         msg.twist_angular_x, msg.twist_angular_y, msg.twist_angular_z = target_angular_vel
 
         # TODO Finger!
@@ -1533,6 +1498,10 @@ class RobotController(Node):
         self.discretize_rotation = self.declare_parameter("discretise_rotation", True).value
         self.quantization_degrees = self.declare_parameter("quantisation_degrees", 45).value
         
+        
+        self.camera_rotation_compensation = self.declare_parameter("camera_rotation_compensation", False).value
+        
+        
         # NEW: Discrete waypoint execution parameters
         self.discrete_motion_speed = self.declare_parameter(
             "discrete_motion_speed", 0.50).value  # 150% of max velocity
@@ -1874,15 +1843,38 @@ class RobotController(Node):
             self.get_logger().error(f'Error in control_tick: {e}')
             traceback.print_exc()
         
-    def get_tracking_compensation(self, camera_frame="camera_optical_frame", target_frame="aruco_91") -> Rotation:
+    def get_tracking_compensation(self, camera_frame="camera_optical_frame", target_frame="bt_UpHybridRe_ee") -> Rotation:
 
         x_enabled = True
         y_enabled = False
+        STALENESS_TIMEOUT_SEC = 2.5
 
         """Computes the rotation offset required to point the target_frame at the camera_frame."""
         pos_camera = self.get_frame_position(camera_frame, ROBOT_BASE_FRAME)
         pos_ee = self.get_frame_position(target_frame, ROBOT_BASE_FRAME)
         rot_ee = self.get_frame_rotation(target_frame, ROBOT_BASE_FRAME)
+
+        # pos_target = self.get_frame_position(target_frame, ROBOT_BASE_FRAME)
+        # if pos_target is None:
+        #     pos_target = self.get_frame_position("j2n6s300_end_effector", ROBOT_BASE_FRAME)
+
+        current_time = self.get_clock().now()
+        # --- Staleness / fallback logic ---
+        tracking_valid = (
+            pos_camera is not None and
+            pos_ee     is not None and
+            rot_ee     is not None and
+            np.linalg.norm(pos_camera) >= 0.01
+        )
+
+        if not tracking_valid:
+            # Check how long we've been without a valid fix
+            if self.last_tracking_time is not None:
+                stale_sec = (current_time - self.last_tracking_time).nanoseconds * 1e-9
+                if stale_sec > STALENESS_TIMEOUT_SEC:
+                    # Decay back to identity
+                    return Rotation.from_quat([0, 0, 0, 1])
+            return self.last_valid_tracking_offset
 
         # Basic validity check
         if pos_camera is None or pos_ee is None or rot_ee is None or np.linalg.norm(pos_camera) < 0.01:
@@ -1891,7 +1883,6 @@ class RobotController(Node):
         # =================================================================
         # 1. Calculate actual time delta (dt)
         # =================================================================
-        current_time = self.get_clock().now()
         if self.last_tracking_time is None:
             dt = 1.0 / REFRESH_RATE
         else:
@@ -1906,9 +1897,7 @@ class RobotController(Node):
         # =================================================================
         # 1. Smooth the user's head position (EMA Filter)
         # =================================================================
-        
         settle_gain = 2.5  # Higher = faster settling, but more jitter. Adjust as needed.
-
         alpha = 1.0 - np.exp(-settle_gain * dt)
         # alpha = 0.002  # Smoothing factor (0.0 to 1.0). Lower = smoother, less jitter.
 
@@ -1932,8 +1921,10 @@ class RobotController(Node):
         yz_magnitude = np.hypot(-vec_local[1], vec_local[2])
         angle_z = -np.arctan2(vec_local[0], yz_magnitude)   if x_enabled else  0
 
-        self.last_valid_tracking_offset = Rotation.from_euler('xz', [angle_x, angle_z], degrees=False)
-        return Rotation.from_euler('xz', [angle_x, angle_z], degrees=False)
+
+        result = Rotation.from_euler('xz', [angle_x, angle_z], degrees=False)
+        self.last_valid_tracking_offset = result
+        return result
 
     # ========================================================================
     # UTILITY METHODS
