@@ -15,9 +15,9 @@
     kp_linear: 0.82
     ki_linear: 0.005
     kd_linear: 0.001
-    kp_angular: 1.00
-    ki_angular: 0.05
-    kd_angular: 0.001
+    kp_angular: 1.8
+    ki_angular: 0.01
+    kd_angular: 0.01
     discrete_motion_speed: 0.50
     waypoint_position_threshold: 0.005
     waypoint_orientation_threshold_deg: 5.0

@@ -400,20 +400,17 @@ class RotationController:
 
     def compute_angular_velocity(self, target_rotation: Rotation, 
                         current_rotation: Rotation, 
-                        pid_controller: Optional[PIDController] = None) -> np.ndarray:
+                        pid_controller: Optional[PIDController] = None,
+                        current_angular_vel: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Compute angular velocity [rx, ry, rz] to reach target.
+        Expressed in the end-effector (local/body) frame 
         """
-        # 1. Calculate error: Target * Inverse(Current) -> Difference in Global Frame
-        # Or: Current.inv * Target -> Difference in Local Frame
-        # We usually want velocity commands in the End Effector (Local) or Base frame depending on robot driver.
-        # Assuming Jaco accepts 'PoseVelocity' in Base frame (usually), but check driver!
-        
-        # error_rot = target_rotation * current_rotation.inv() # Global Frame
+        # 1. Calculate error in LOCAL (body) frame
         error_rot = current_rotation.inv() * target_rotation # Local Frame
         
         # 2. Convert to Rotation Vector (Axis-Angle)
-        rot_vec = error_rot.as_rotvec() * self.max_angular_velocity # Vector direction = axis, Magnitude = angle (rads)
+        rot_vec = error_rot.as_rotvec() * self.max_angular_velocity 
         
         # 3. Clamp Magnitude (Safety)
         mag = np.linalg.norm(rot_vec)
@@ -423,6 +420,11 @@ class RotationController:
             
         # 4. PID or Proportional
         if pid_controller:
+
+            measured_vel = (current_angular_vel if current_angular_vel is not None 
+                            else np.zeros(3))
+            return pid_controller.control_update(rot_vec, measured_vel)
+        
              # Assuming PID controller keeps track of dt internally
             return pid_controller.control_update(rot_vec , np.zeros(3))
         else:
@@ -677,10 +679,15 @@ class ContinuousTeleopBehavior(ControlBehavior):
         # Compute Base Angular Velocity from Rotation Controller
         current_ee_rot = self.controller.get_ee_rotation()
         if current_ee_rot:
+
+            measured_angular_vel = (self.controller.current_vel[3:6] 
+                             if self.controller.current_vel is not None else None)
             target_angular_vel = self.controller.rotation_controller.compute_angular_velocity(
                 final_rotation_target,
                 current_ee_rot,
-                pid_controller= self.controller.pid_angular
+                pid_controller= self.controller.pid_angular,
+                current_angular_vel=measured_angular_vel
+
             )
         else:
             target_angular_vel = np.zeros(3)
@@ -1244,10 +1251,13 @@ class DiscreteTeleopBehavior(ControlBehavior):
         # 3. Compute velocity to this DYNAMIC target
         current_rot = self.controller.get_ee_rotation()
         if current_rot is not None:
+            measured_angular_vel = (self.controller.current_vel[3:6] 
+                                    if self.controller.current_vel is not None else None)
             angular_velocity = self.controller.rotation_controller.compute_angular_velocity(
                 dynamic_target_rot, # Use the dynamic one, not the static one
                 current_rot,
-                pid_controller=self.controller.pid_angular
+                pid_controller=self.controller.pid_angular,
+                current_angular_vel=measured_angular_vel
             )
         else:
             angular_velocity = np.zeros(3)
@@ -1411,7 +1421,7 @@ class RobotController(Node):
         self.pid_linear = PIDController(kp=self.kp_linear, ki=self.ki_linear, kd=self.kd_linear, length=3)
         self.pid_angular = PIDController(kp=self.kp_angular, ki=self.ki_angular, kd=self.kd_angular, length=3) # PID for angular velocity
 
-        self.vel_filter = RollingAverageFilter(window_size=10)
+        self.vel_filter = RollingAverageFilter(window_size=6)
         self.vel_integrator = VelocityIntegrator(self.max_linear_velocity)
         
         self.rotation_controller = RotationController(
@@ -1490,9 +1500,9 @@ class RobotController(Node):
         self.kp_linear = self.declare_parameter("kp_linear", 0.7).value
         self.ki_linear = self.declare_parameter("ki_linear", 0.1).value
         self.kd_linear = self.declare_parameter("kd_linear", 0.0).value
-        self.kp_angular = self.declare_parameter("kp_angular", 2.0).value
-        self.ki_angular = self.declare_parameter("ki_angular", 2.0).value
-        self.kd_angular = self.declare_parameter("kd_angular", 5.0).value
+        self.kp_angular = self.declare_parameter("kp_angular", 0.0).value
+        self.ki_angular = self.declare_parameter("ki_angular", 0.0).value
+        self.kd_angular = self.declare_parameter("kd_angular", 0.0).value
 
         # Rotation
         self.discretize_rotation = self.declare_parameter("discretise_rotation", True).value
@@ -1559,7 +1569,7 @@ class RobotController(Node):
         )
         
         # Filters
-        self.vel_filter = RollingAverageFilter(window_size=5)
+        self.vel_filter = RollingAverageFilter(window_size=6)
         # TODO: Change to Exponential Moving Average?
         # self.vel_filter = ExponentialMovingAverageFilter(alpha=0.1)
 
@@ -1797,14 +1807,32 @@ class RobotController(Node):
         if duration < 1e-6:
             return
         
-        raw_vel = np.array([
+        # --- Linear velocity ---
+        linear_vel = np.array([
             current_pose.pose.position.x - prev_pose.pose.position.x,
             current_pose.pose.position.y - prev_pose.pose.position.y,
             current_pose.pose.position.z - prev_pose.pose.position.z,
-            current_pose.pose.orientation.w - prev_pose.pose.orientation.w,
-            current_pose.pose.orientation.x - prev_pose.pose.orientation.x,
-            current_pose.pose.orientation.y - prev_pose.pose.orientation.y
         ]) / duration
+
+        # --- Angular velocity (rotvec-based derivative) ---
+        prev_rot = Rotation.from_quat([
+            prev_pose.pose.orientation.x,
+            prev_pose.pose.orientation.y,
+            prev_pose.pose.orientation.z,
+            prev_pose.pose.orientation.w
+        ])
+        current_rot = Rotation.from_quat([
+            current_pose.pose.orientation.x,
+            current_pose.pose.orientation.y,
+            current_pose.pose.orientation.z,
+            current_pose.pose.orientation.w
+        ])
+
+        # Local/body-frame incremental rotation, matching the current.inv() * target convention used in compute_angular_velocity.
+        delta_rot_body = prev_rot.inv() * current_rot
+        angular_vel = delta_rot_body.as_rotvec() / duration  # rad/s, body frame
+
+        raw_vel = np.concatenate([linear_vel, angular_vel])
         
         self.current_vel = self.vel_filter.update(raw_vel)
         self.time_prev = current_time
