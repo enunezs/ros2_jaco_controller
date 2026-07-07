@@ -7,7 +7,7 @@
       - 0.1
       - 0.06
       - 0.08
-    max_angular_velocity: 8.0
+    max_angular_velocity: 80.0
     max_finger_velocity: 2000.0
     discretise_rotation: True
     quantisation_degrees: 30

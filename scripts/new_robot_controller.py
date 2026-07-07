@@ -42,9 +42,9 @@ from scipy.spatial.transform import Rotation, Slerp
 REFRESH_RATE = 100.0
 # Define start rotation (using Quaternions internally is safer)
 # START_ROTATION = Rotation.from_euler('xyz', [-180-20, 0-5, 180-10], degrees=True)
-START_ROTATION = Rotation.from_euler('xyz', [-180, 0-5, 180], degrees=True)
+START_ROTATION = Rotation.from_euler('xyz', [-180, 0, 180], degrees=True)
 MAX_LINEAR_VELOCITY = (0.1, 0.06, 0.08)
-MAX_ANGULAR_VELOCITY = 2.0
+MAX_ANGULAR_VELOCITY = 200.0
 MAX_FINGER_VELOCITY = 2000.0
 ROBOT_BASE_FRAME = "j2n6s300_link_base"
 
@@ -160,17 +160,22 @@ class VelocityIntegrator:
     """
     
     def __init__(self, max_velocity: Tuple[float, float, float], 
-                 accel_time: float = 1.5, brake_time: float = 0.15, 
+                 forward_acceleration: Tuple[float, float, float] = (0.005, 0.003, 0.007), # m/s^2
+                 brake_acceleration: float = 0.8, # m/s^2
+                 min_speed :Tuple[float, float, float] = (0.0135, 0.0135, 0.014),
+                 deadzone: float = 0.05,
                  refresh_rate: float = 100.0):
-        self.max_velocity = np.array(max_velocity)
-        self.prev_velocity = np.zeros(3)
+
         # TODO: Expose! Super important variable hiding here
-        # self.forward_acceleration = np.array([0.0, 0.0, 0.0])/3
-        self.forward_acceleration = np.array([0.015, 0.009, 0.02])/3
-        self.brake_acceleration = 0.8
-        self.min_speed = [0.0135, 0.0135, 0.014]
-        # self.min_speed = [0.008, 0.014, 0.01]
-        self.deadzone = 0.05 # Input deadzone (0 to 1)
+        self.max_velocity = np.array(max_velocity)
+        self.forward_acceleration = np.array(forward_acceleration)
+        self.brake_acceleration = brake_acceleration
+        self.min_speed = np.array(min_speed)
+
+        self.deadzone = deadzone # Input deadzone (0 to 1)
+
+        self.prev_velocity = np.zeros(3)
+
 
     def update(self, input_vector: np.ndarray, dt: float) -> np.ndarray:
         """
@@ -202,6 +207,7 @@ class VelocityIntegrator:
             # Acceleration
             else:
                 velocity[idx] += input_dir * self.forward_acceleration[idx] * dt 
+                # print(f"Accelerating on axis {idx}: new velocity {velocity[idx]}")
                 
                 # Fast start from rest
                 if abs(velocity[idx]) < self.min_speed[idx]:
@@ -544,14 +550,14 @@ class ContinuousTeleopBehavior(ControlBehavior):
         input_frame = twist.header.frame_id        
 
         # 2B. We apply an offset to account for the robot weird shape
-        ROTATION_OFFSET = Rotation.from_euler('xyz', [0-15, 180, -12], degrees=True) # Minor offset to account for only two fingers
+        ROTATION_OFFSET = Rotation.from_euler('xyz', [0-15, 0, 12], degrees=True) # Minor offset to account for only two fingers
 
         # If input is not in base frame, rotate the linear velocity vector
         if input_frame and input_frame != ROBOT_BASE_FRAME:
             target_linear_vel = self.controller.transform_vector(
                 target_linear_vel, input_frame, ROBOT_BASE_FRAME
             )
-            target_linear_vel = ROTATION_OFFSET.inv().apply(target_linear_vel)
+            target_linear_vel = ROTATION_OFFSET.apply(target_linear_vel)
 
         # Apply Smoothing & PID (Linear)
         target_linear_vel = self.controller.vel_integrator.update(target_linear_vel, dt=1.0/REFRESH_RATE)
@@ -578,8 +584,8 @@ class ContinuousTeleopBehavior(ControlBehavior):
             # print(f"Found ref frame {rotation_reference_frame.as_euler('xyz', degrees=True)}")
 
         # Force for now
-        rotation_reference_frame = Rotation.from_quat([0,0,0,1])
-
+        # rotation_reference_frame = Rotation.from_quat([0,0,0,1])
+        rotation_reference_frame = START_ROTATION
 
         # 2. Final rotation
         # ROTATION_OFFSET = Rotation.from_euler('xyz', [0, 180, 0], degrees=True) # Minor offset to account for only two fingers
@@ -647,6 +653,12 @@ class ContinuousTeleopBehavior(ControlBehavior):
         # 2C. Apply user inputs, quantize, and apply offsets
         # Update the Target Orientation state
         target_angular_input = np.array([twist.twist.angular.x, twist.twist.angular.y, twist.twist.angular.z])
+
+        # TODO: Finish
+        target_angular_input = self.controller.rot_integrator.update(
+            target_angular_input, 
+            dt=1.0/REFRESH_RATE
+        )
 
         rotation_target = self.controller.rotation_controller.update_target_rotation_from_input(
             target_angular_input,
@@ -716,6 +728,8 @@ class ContinuousTeleopBehavior(ControlBehavior):
         self.controller.pid_linear.reset()
         self.controller.pid_angular.reset()
     
+        self.controller.rot_integrator.reset()
+
     def on_exit(self):
         """Send zero velocity when exiting."""
         self.controller.get_logger().info("Exiting continuous teleop mode")
@@ -1419,15 +1433,27 @@ class RobotController(Node):
         
         # Components
         self.pid_linear = PIDController(kp=self.kp_linear, ki=self.ki_linear, kd=self.kd_linear, length=3)
-        self.pid_angular = PIDController(kp=self.kp_angular, ki=self.ki_angular, kd=self.kd_angular, length=3) # PID for angular velocity
+        self.pid_angular = PIDController(kp=self.kp_angular, ki=self.ki_angular, kd=self.kd_angular, length=3) 
 
         self.vel_filter = RollingAverageFilter(window_size=6)
         self.vel_integrator = VelocityIntegrator(self.max_linear_velocity)
-        
+
+        # Rotation controller
         self.rotation_controller = RotationController(
             start_rotation=START_ROTATION,
-            quantization_degrees=self.quantization_degrees
+            quantization_degrees=self.quantization_degrees,
+            # max_angular_velocity=self.max_angular_velocity,
+            # refresh_rate=REFRESH_RATE
         )
+        self.rot_integrator = VelocityIntegrator(
+            max_velocity=(self.max_angular_velocity, self.max_angular_velocity, self.max_angular_velocity),
+            # You might want to adjust these specific for rotation feel:
+            forward_acceleration = (0.2, 0.2, 0.2), 
+            brake_acceleration = 4.0, 
+            min_speed = (0.8, 0.8, 0.8),
+            refresh_rate=REFRESH_RATE,
+            )
+        
         # Finger
         self.finger_controller = FingerController(self, max_velocity=self.max_finger_velocity)
         self.current_finger_pose = np.zeros(3) # Track current state
@@ -1551,7 +1577,8 @@ class RobotController(Node):
 
     def _init_shared_components(self):
         """Initialize shared utility components."""
-        # PID controllers
+
+        ### PID controllers
         self.pid_linear = PIDController(
             kp=self.kp_linear,
             ki=self.ki_linear,
@@ -1559,7 +1586,6 @@ class RobotController(Node):
             refresh_rate=REFRESH_RATE,
             length=3
         )
-        
         self.pid_angular = PIDController(
             kp=self.kp_angular,
             ki=self.ki_angular,
@@ -1568,14 +1594,24 @@ class RobotController(Node):
             length=3
         )
         
-        # Filters
+        ### Filters
         self.vel_filter = RollingAverageFilter(window_size=6)
         # TODO: Change to Exponential Moving Average?
         # self.vel_filter = ExponentialMovingAverageFilter(alpha=0.1)
 
-        # Velocity integrator
-        self.vel_integrator = VelocityIntegrator(max_velocity=self.max_linear_velocity)
-        
+        ### Velocity integrator
+        # self.vel_integrator = VelocityIntegrator(max_velocity=self.max_linear_velocity)
+        # Rotation Integrator
+        # Note: We use the max_angular_velocity for all three axes (rx, ry, rz)
+        # self.rot_integrator = VelocityIntegrator(
+        #     max_velocity=(self.max_angular_velocity, self.max_angular_velocity, self.max_angular_velocity),
+        #     # You might want to adjust these specific for rotation feel:
+        #     # accel_time=1.0, 
+        #     forward_acceleration = (0.1, 0.1, 0.1), 
+        #     brake_acceleration = 0.4, 
+        #     refresh_rate=REFRESH_RATE,
+        #     )
+
         # Rotation controller
         self.rotation_controller = RotationController(
             start_rotation=START_ROTATION,
@@ -1583,7 +1619,7 @@ class RobotController(Node):
             max_angular_velocity=self.max_angular_velocity,
             # refresh_rate=REFRESH_RATE
         )
-    
+
     def _init_behaviors(self):
         """Initialize mode-specific behaviors."""
         self.behaviors = {
@@ -2110,6 +2146,8 @@ class RobotController(Node):
         self.pid_linear.reset()
         self.pid_angular.reset()
         self.vel_integrator.reset()
+        self.rot_integrator.reset()
+
         self.rotation_controller.reset()
         
         # TODO: Send robot to home position
