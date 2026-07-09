@@ -162,7 +162,7 @@ class VelocityIntegrator:
     def __init__(self, max_velocity: Tuple[float, float, float], 
                  forward_acceleration: Tuple[float, float, float] = (0.005, 0.003, 0.007), # m/s^2
                  brake_acceleration: float = 0.8, # m/s^2
-                 min_speed :Tuple[float, float, float] = (0.0135, 0.0135, 0.014),
+                 min_speed :Tuple[float, float, float] = (0.0135, 0.0135, 0.001), #0.014
                  deadzone: float = 0.05,
                  refresh_rate: float = 100.0):
 
@@ -172,52 +172,98 @@ class VelocityIntegrator:
         self.brake_acceleration = brake_acceleration
         self.min_speed = np.array(min_speed)
 
+        # self.min_speed = np.array([0,0,0])
+
+
         self.deadzone = deadzone # Input deadzone (0 to 1)
 
         self.prev_velocity = np.zeros(3)
 
-
     def update(self, input_vector: np.ndarray, dt: float) -> np.ndarray:
-        """
-        Apply smooth acceleration/deceleration to input.
-        
-        Args:
-            input_vector: Raw input [-1, 1] range
-            dt: Time delta (1/refresh_rate)
-            
-        Returns:
-            Smoothed velocity vector
-        """
-        velocity = self.prev_velocity.copy()
-        hard_brake_threshold = 0.02 # m/s Speed threshold for hard braking
-        
-        for idx, input_dir in enumerate(input_vector):
-            is_hard_brake = ((input_dir * velocity[idx]) < -hard_brake_threshold)
-            is_deadzone = abs(input_dir) < self.deadzone
-            movement_dir = 1 if velocity[idx] > 0 else -1
+        input_vector = np.asarray(input_vector, dtype=float)
+        norm = np.linalg.norm(input_vector)
 
-            # Deceleration
-            if is_deadzone or is_hard_brake:
-                velocity[idx] -= movement_dir * self.brake_acceleration * dt
-                # self.get_logger().debug(f"Braking on axis {idx}: new velocity {velocity[idx]}")
-                
-                if abs(velocity[idx]) < self.min_speed[idx] * 1.5:
-                    velocity[idx] = 0.0
-            
-            # Acceleration
-            else:
-                velocity[idx] += input_dir * self.forward_acceleration[idx] * dt 
-                # print(f"Accelerating on axis {idx}: new velocity {velocity[idx]}")
-                
-                # Fast start from rest
-                if abs(velocity[idx]) < self.min_speed[idx]:
-                    velocity[idx] = self.min_speed[idx] * np.sign(input_dir)
-            
-            # Clamp to max velocity
-            velocity[idx] = np.clip(velocity[idx], -self.max_velocity[idx], self.max_velocity[idx])
-        
+        # Deadzone / hard-brake checks now operate on the WHOLE vector, not per-axis
+        is_deadzone = norm < self.deadzone
+        prev_speed = np.linalg.norm(self.prev_velocity)
+        direction = self.prev_velocity / prev_speed if prev_speed > 1e-9 else (
+            input_vector / norm if norm > 1e-9 else np.zeros(3)
+        )
+        is_hard_brake = (norm > 1e-9) and (np.dot(input_vector, direction) < -self.deadzone) and prev_speed > 0
+
+        if is_deadzone or is_hard_brake:
+            # Decelerate the scalar speed, keep existing direction
+            new_speed = max(prev_speed - self.brake_acceleration * dt, 0.0)
+            if new_speed < np.min(self.min_speed) * 1.5:
+                new_speed = 0.0
+            velocity = direction * new_speed
+        else:
+            input_dir = input_vector / norm  # unit direction of the *new* command
+            # Accelerate scalar speed using a single acceleration rate
+            # (use the weighted/min acceleration across axes the direction touches,
+            #  or just pick one consistent scalar rate rather than per-axis)
+            accel = np.dot(np.abs(input_dir), self.forward_acceleration)  # blended rate
+            new_speed = prev_speed + accel * dt
+
+            min_speed_scalar = np.dot(np.abs(input_dir), self.min_speed)  # blended floor
+            if new_speed < min_speed_scalar:
+                new_speed = min_speed_scalar
+
+            velocity = input_dir * new_speed
+
+            # Clamp to per-axis max_velocity WITHOUT distorting direction:
+            # find the limiting axis and scale the whole vector down uniformly
+            ratios = np.divide(np.abs(velocity), self.max_velocity,
+                                out=np.zeros_like(velocity), where=self.max_velocity > 0)
+            max_ratio = np.max(ratios)
+            if max_ratio > 1.0:
+                velocity = velocity / max_ratio
+
         self.prev_velocity = velocity
         return velocity
+
+    # def update(self, input_vector: np.ndarray, dt: float) -> np.ndarray:
+    #     """
+    #     Apply smooth acceleration/deceleration to input.
+        
+    #     Args:
+    #         input_vector: Raw input [-1, 1] range
+    #         dt: Time delta (1/refresh_rate)
+            
+    #     Returns:
+    #         Smoothed velocity vector
+    #     """
+
+    #     velocity = self.prev_velocity.copy()
+    #     hard_brake_threshold = 0.02 # m/s Speed threshold for hard braking
+        
+    #     for idx, input_dir in enumerate(input_vector):
+    #         is_hard_brake = ((input_dir * velocity[idx]) < -hard_brake_threshold)
+    #         is_deadzone = abs(input_dir) < self.deadzone
+    #         movement_dir = 1 if velocity[idx] > 0 else -1
+
+    #         # Deceleration
+    #         if is_deadzone or is_hard_brake:
+    #             velocity[idx] -= movement_dir * self.brake_acceleration * dt
+    #             # self.get_logger().debug(f"Braking on axis {idx}: new velocity {velocity[idx]}")
+                
+    #             if abs(velocity[idx]) < self.min_speed[idx] * 1.5:
+    #                 velocity[idx] = 0.0
+            
+    #         # Acceleration
+    #         else:
+    #             velocity[idx] += input_dir * self.forward_acceleration[idx] * dt 
+    #             # print(f"Accelerating on axis {idx}: new velocity {velocity[idx]}")
+                
+    #             # Fast start from rest
+    #             if abs(velocity[idx]) < self.min_speed[idx]:
+    #                 velocity[idx] = self.min_speed[idx] * np.sign(input_dir)
+            
+    #         # Clamp to max velocity
+    #         velocity[idx] = np.clip(velocity[idx], -self.max_velocity[idx], self.max_velocity[idx])
+        
+    #     self.prev_velocity = velocity
+    #     return velocity
 
     def reset(self):
         """Reset to zero velocity."""
@@ -532,7 +578,7 @@ class ContinuousTeleopBehavior(ControlBehavior):
             return None
         
         # dt = 1.0 / REFRESH_RATE
-        # input_frame = twist.header.frame_id or ROBOT_BASE_FRAME
+        # input_frame_id = twist.header.frame_id or ROBOT_BASE_FRAME
 
         # 1. Compute Linear Velocity
         target_linear_vel = np.array([twist.twist.linear.x, twist.twist.linear.y, twist.twist.linear.z])
@@ -547,20 +593,27 @@ class ContinuousTeleopBehavior(ControlBehavior):
         ######################################################
 
         # The Twist message tells us what frame the input is in (e.g., "head_camera", "base_link")
-        input_frame = twist.header.frame_id        
+        input_frame_id = twist.header.frame_id      
 
         # 2B. We apply an offset to account for the robot weird shape
         ROTATION_OFFSET = Rotation.from_euler('xyz', [0-15, 0, 12], degrees=True) # Minor offset to account for only two fingers
 
         # If input is not in base frame, rotate the linear velocity vector
-        if input_frame and input_frame != ROBOT_BASE_FRAME:
+        if input_frame_id and input_frame_id != ROBOT_BASE_FRAME:
             target_linear_vel = self.controller.transform_vector(
-                target_linear_vel, input_frame, ROBOT_BASE_FRAME
+                target_linear_vel, input_frame_id, ROBOT_BASE_FRAME
             )
+            # self.controller.get_logger().info(f"Transformed linear velocity from {input_frame_id} to {ROBOT_BASE_FRAME}: {np.round(target_linear_vel, 2)}")  
+            
             target_linear_vel = ROTATION_OFFSET.apply(target_linear_vel)
+            # self.controller.get_logger().info(f"Applied rotation offset: {np.round(target_linear_vel, 2)}")
+
 
         # Apply Smoothing & PID (Linear)
         target_linear_vel = self.controller.vel_integrator.update(target_linear_vel, dt=1.0/REFRESH_RATE)
+        self.controller.get_logger().info(f"Vel after smoothing integrator: {np.round(target_linear_vel, 2)}")
+        
+        
         if self.controller.current_vel is not None:
              # Basic Feedforward + PID correction
              pid_out = self.controller.pid_linear.control_update(target_linear_vel, self.controller.current_vel[0:3])
@@ -575,13 +628,15 @@ class ContinuousTeleopBehavior(ControlBehavior):
         # This allows "Up" on joystick to mean "Up" in camera view
         # print(f"Rotation reference frame is: {rotation_reference_frame}")
 
-        rotation_reference_frame  = self.controller.get_frame_rotation(input_frame, ROBOT_BASE_FRAME)
-        # rotation_reference_frame = self.controller.get_ee_rotation()
-        if rotation_reference_frame is None:
-            rotation_reference_frame = Rotation.from_quat([0,0,0,1])
-        else:
-            pass
-            # print(f"Found ref frame {rotation_reference_frame.as_euler('xyz', degrees=True)}")
+        # # Here?
+        # rotation_reference_frame  = self.controller.get_frame_rotation(input_frame_id, ROBOT_BASE_FRAME)
+        # # rotation_reference_frame = self.controller.get_ee_rotation()
+        # if rotation_reference_frame is None:
+        #     rotation_reference_frame = Rotation.from_quat([0,0,0,1])
+        #     # print("Warning: Could not find rotation reference frame, defaulting to identity.")
+        # else:
+        #     pass
+        #     # print(f"Found ref frame {rotation_reference_frame.as_euler('xyz', degrees=True)}")
 
         # Force for now
         # rotation_reference_frame = Rotation.from_quat([0,0,0,1])
@@ -617,12 +672,12 @@ class ContinuousTeleopBehavior(ControlBehavior):
 
         # 2B. User Compensation (Optional)
         # TODO: Forcing for now
-        input_frame = "camera_optical_frame"
+        input_frame_id = "camera_optical_frame"
         target_frame = "bt_UpHybridRe"
 
         user_compensation = False
         if user_compensation:
-            user_tracking_rot = self.controller.get_tracking_compensation(camera_frame=input_frame, target_frame=target_frame)
+            user_tracking_rot = self.controller.get_tracking_compensation(camera_frame=input_frame_id, target_frame=target_frame)
         else:
             user_tracking_rot : Rotation =  Rotation.from_quat([0,0,0,1])
             
@@ -2093,6 +2148,11 @@ class RobotController(Node):
                 transform.transform.rotation.w
             ])
             self.last_valid_input_to_base_rot = rot
+
+            delay = (self.get_clock().now() - Time.from_msg(transform.header.stamp)).nanoseconds * 1e-9
+            # if delay > 0.01:
+                # self.get_logger().warn(f"Transform {source_frame} -> {target_frame} is stale by {delay:.3f}s in transform_vector()")
+
             return rot.apply(vector)
         
         except (LookupException, ConnectivityException, ExtrapolationException):
@@ -2105,6 +2165,11 @@ class RobotController(Node):
             return None # Identity
         try:
             transform = self.tf_buffer.lookup_transform(target_frame, source_frame, rclpy.time.Time())
+
+            delay = (self.get_clock().now() - Time.from_msg(transform.header.stamp)).nanoseconds * 1e-9
+            if delay > 0.01:
+                self.get_logger().warn(f"Transform {source_frame} -> {target_frame} is stale by {delay:.3f}s in get_frame_rotation()")
+
             return Rotation.from_quat([
                 transform.transform.rotation.x,
                 transform.transform.rotation.y,
@@ -2128,8 +2193,14 @@ class RobotController(Node):
         except (LookupException, ConnectivityException, ExtrapolationException):
             return None
 
+    # def get_ee_rotation(self) -> Optional[Rotation]:
+        # return self.get_frame_rotation('j2n6s300_end_effector', ROBOT_BASE_FRAME)
+
     def get_ee_rotation(self) -> Optional[Rotation]:
-        return self.get_frame_rotation('j2n6s300_end_effector', ROBOT_BASE_FRAME)
+        if self.current_pose is None:
+            return None
+        q = self.current_pose.pose.orientation
+        return Rotation.from_quat([q.x, q.y, q.z, q.w])
 
     # ========================================================================
     # SYSTEM COMMANDS
